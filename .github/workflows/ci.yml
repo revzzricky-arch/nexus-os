@@ -85,8 +85,44 @@ jobs:
 
       - name: Run full backend test suite
         run: |
-          pytest -v -W ignore --tb=short
+          set -o pipefail
+          pytest -v -W ignore --tb=short 2>&1 | tee /tmp/pytest.txt
           echo "Full backend pytest suite passed"
+
+      - name: Post pytest failures as PR comment
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let output = '';
+            try {
+              output = fs.readFileSync('/tmp/pytest.txt', 'utf8');
+            } catch (e) {
+              output = 'Could not read pytest output: ' + e.message;
+            }
+            const lines = output.split('\n');
+            const failed = lines.filter(l => l.includes('FAILED') || l.includes('ERROR')).slice(-100).join('\n');
+            const tail = lines.slice(-300).join('\n');
+            const body = `### Backend pytest FAILED (py312) ${{ github.sha }}\n\n**Failed tests:**\n\`\`\`\n${failed}\n\`\`\`\n\n**Tail 300:**\n\`\`\`\n${tail.slice(-6000)}\n\`\`\`\n`;
+            console.log(body);
+            const prs = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: `${context.repo.owner}:feat/phase3-durable-worker`,
+              state: 'open'
+            });
+            let prNumber = 8;
+            if (prs.data.length > 0) {
+              prNumber = prs.data[0].number;
+            }
+            console.log(`Posting to PR ${prNumber}`);
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: body
+            });
 
       - name: Security scan - no hardcoded secrets, no eval/exec abuse
         run: |
