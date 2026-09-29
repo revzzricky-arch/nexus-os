@@ -1,11 +1,24 @@
-# NexusOS — Architecture & Design Document v0.1
+# NexusOS (Codename) — Architecture & Design Document v0.2
 
-**Status:** DRAFT - Architecture Phase Only - Awaiting Approval  
+**Status:** APPROVED CONCEPTUALLY - Corrections Applied (Review Feedback 2026-09-29) - Awaiting Scaffold Approval  
 **Date:** 2026-09-29  
+**Version:** v0.2  
 **Branch:** arena/01a0ebdf-nexus-os  
 **Author:** Agent Mode (Architecture Session)
 
-> This document defines the full architecture for NexusOS, a 3D Agent Operating System / AI Agent Command Center. No application code is implemented in this phase. All design is original and must not copy proprietary source, UI, branding, or wording from any existing product.
+> This document defines the full architecture for NEXUS (internal codename, repository `nexus-os`), a 3D Agent Operating System / AI Agent Command Center. No application code is implemented in this phase. All design is original and must not copy proprietary source, UI, branding, or wording from any existing product.
+> **Naming Note:** "NexusOS" / "NEXUS" is used as an internal repository/project codename only. It is NOT claimed as a final unique public brand. Multiple existing projects already use NexusOS. The public product name will be finalized later.
+
+**Changelog v0.1 -> v0.2 (Review Feedback):**
+- Frontend: Target Next.js 16.x, React 19, R3F 9, no hard-pinned patch versions
+- MCP: stdio for local, Streamable HTTP for remote, SSE only as legacy compatibility note
+- Deployment: MVP is Docker Compose only, no cloud vendor commitment
+- Sandbox: Introduced SandboxService abstraction, container isolation for command execution, no unrestricted host shell/file access
+- 3D: Hybrid orbital + layered DAG confirmed, focus on runtime state (agents, tasks, workflows, tool activity, approval gates), not raw vector DB rendering
+- Model provider: Lightweight abstraction with OpenAI-compatible, Anthropic, Ollama providers; Arena/OpenAI-compatible behind abstraction
+- Naming: Clarified temporary codename
+- MVP: 6-8 week estimate is planning estimate only
+- Decisions D1-D10 recorded as selected defaults
 
 ---
 
@@ -187,21 +200,25 @@ Uploads docs -> RAG pipeline ingests, chunks, embeds. Creates collection. Links 
 
 ### 6. MVP vs Advanced Features
 
-**MVP (V0.1 - 6-8 weeks):**
+**MVP (Planning Estimate Only - 6-8 weeks, NOT a commitment):**
 - Supervisor + 3 specialized agents (Researcher, Coder, Analyst) hardcoded but configurable via JSON
 - Mission creation (goal + template), DAG execution (LangGraph), sequential+parallel
-- Tool registry with 8 tools: web_search, read_file (sandboxed), write_file (approval), shell (approval + sandbox), memory_search, rag_query, mcp_proxy, human_approval_mock
-- MCP integration: 1-2 servers (filesystem, fetch) via official Python SDK
+- Tool registry with 8 tools: web_search, read_file (sandboxed via SandboxService), write_file (approval), shell (approval + container-isolated), memory_search, rag_query, mcp_proxy, human_approval_mock
+- MCP integration: 1-2 servers (filesystem via stdio, fetch via Streamable HTTP) via official Python SDK; SSE mentioned only as legacy compat
 - Memory: Postgres + pgvector, simple semantic search, short + long term
-- RAG: Upload .md/.txt/.pdf, chunk (512 tokens, 50 overlap), embed (openai small or local), retrieve top 5
-- Permissions: 3 levels - auto, approval_required, forbidden. Config per tool.
+- RAG: Upload .md/.txt/.pdf, chunk (512 tokens, 50 overlap), embed (local-first provider, replaceable), retrieve top 5
+- Permissions: 3 levels - auto, approval_required, forbidden. Config per tool. Balanced policy, shell always approval.
 - Approval: UI modal + 3D gate, approve/deny/edit, timeout 5m auto-deny
 - Realtime: FastAPI WS, Redis pubsub, event types: agent_state, tool_call, message, approval_request, mission_update
 - Audit log: immutable table, export JSON
 - Observability: Structlog JSON, OTel traces to console, Prometheus /metrics
-- Frontend: Next.js 14, Tailwind, shadcn, Zustand, TanStack Query, R3F minimal scene: agents as glowing orbs in orbital layout, workflow as lines, event particles, side panel details. No advanced shaders.
-- Auth: Single-user dev token, no multi-tenant
-- Deployment: Docker Compose (web, api, postgres, redis)
+- Frontend: Next.js 16.x, React 19, TypeScript, Tailwind, shadcn/ui, Zustand, TanStack Query, React Three Fiber 9, Three.js, Drei minimal scene: agents as runtime entities in hybrid orbital + layered DAG layout, workflow as lines, tool activity particles, approval gates, side panel details. Focus on mission runtime state, not full vector DB rendering. No advanced shaders.
+- Auth: Single development Bearer token (selected default D4), no multi-tenant
+- Deployment: Docker Compose (web, api, postgres, redis) — MVP deployment target is Docker Compose only, no cloud vendor commitment
+- Model Provider: Lightweight abstraction — ModelProvider with OpenAI-compatible, Anthropic, Ollama; Arena/OpenAI-compatible behind abstraction
+- Sandbox: SandboxService abstraction with container isolation for command execution; agents never get unrestricted host shell/file access
+- Package Manager: pnpm (selected D3)
+- License: MIT (selected D9)
 
 **Advanced (V0.2+):**
 - Custom agent builder UI, prompt versioning, A/B eval
@@ -222,14 +239,14 @@ Uploads docs -> RAG pipeline ingests, chunks, embeds. Creates collection. Links 
 Layered, event-driven, with clear boundaries. Smallest coherent stack that supports vision.
 
 **Layers:**
-1. **Presentation:** Next.js (App Router) + R3F + shadcn. Zustand for 3D selection, TanStack Query for server state.
+1. **Presentation:** Next.js 16.x (App Router) + React 19 + TypeScript + React Three Fiber 9 + Three.js + Drei + Tailwind + shadcn/ui. Zustand for 3D selection, TanStack Query for server state. No hard-pinned patch versions, target current stable-compatible.
 2. **API Gateway:** FastAPI, Pydantic v2, handles REST + WS, auth middleware, rate limit, validation.
 3. **Orchestration Core:** LangGraph for mission DAG + checkpoint, Supervisor agent (LLM + planner), Agent Runner (asyncio tasks)
-4. **Agent Runtime:** BaseAgent abstract, specialized agents, model abstraction (LiteLLM-style wrapper but lightweight custom)
-5. **Tool Layer:** Tool Registry (Postgres), Permission Engine, MCP Client Manager, Sandboxed Executors
-6. **Memory & RAG:** Postgres + pgvector for vectors, Redis for cache, Ingestion pipeline (chunk, embed, store)
+4. **Agent Runtime:** BaseAgent abstract, specialized agents, model abstraction via lightweight ModelProvider interface (OpenAI-compatible, Anthropic, Ollama; Arena/OpenAI-compatible fits behind abstraction)
+5. **Tool Layer:** Tool Registry (Postgres), Permission Engine, MCP Client Manager (stdio for local, Streamable HTTP for remote, SSE only as legacy compat), SandboxService abstraction (container isolation for command execution)
+6. **Memory & RAG:** Postgres + pgvector for vectors, Redis for cache, Ingestion pipeline (chunk, embed via local-first provider, store)
 7. **Event Bus:** Redis Streams (persistent) + PubSub (ephemeral WS), Event envelope standardized
-8. **Persistence:** PostgreSQL 16 + pgvector extension, SQLAlchemy 2 async, Alembic migrations
+8. **Persistence:** PostgreSQL + pgvector extension, SQLAlchemy async, Alembic migrations (version not pinned)
 9. **Observability:** OTel SDK, structlog, Prometheus client, OTel Collector (optional in MVP -> console)
 
 ```mermaid
@@ -260,8 +277,9 @@ graph TB
         PG[(Postgres<br/>+ pgvector)]
         Redis[(Redis<br/>Streams + PubSub)]
         OTel[OTel Collector<br/>Prometheus]
-        Models[Model Providers<br/>OpenAI/Anthropic/Groq]
-        MCPServers[MCP Servers<br/>FS, GitHub, etc]
+        Models[ModelProvider<br/>OpenAI-compat / Anthropic / Ollama<br/>Arena behind compat]
+        MCPServers[MCP Servers<br/>stdio local +<br/>Streamable HTTP remote]
+        Sandbox[SandboxService<br/>Container Isolation]
     end
 
     Client -- HTTPS/WSS --> REST
@@ -274,7 +292,8 @@ graph TB
     AgentRunner --> ToolReg
     AgentRunner --> Perm
     ToolReg --> MCPMgr
-    MCPMgr --> MCPServers
+    MCPMgr -- stdio / Streamable HTTP --> MCPServers
+    AgentRunner --> Sandbox
     AgentRunner --> MemSvc
     AgentRunner --> RAGSvc
     AgentRunner --> Models
@@ -288,12 +307,15 @@ graph TB
 ```
 
 **Why this stack is minimal:**
-- Next.js gives SSR + API routes + great DX, needed for premium UI
+- Next.js 16.x + React 19 gives App Router, SSR, great DX, needed for premium UI; R3F 9 + Drei for 3D
 - FastAPI + Pydantic is fastest to ship typed Python API with async + WS
 - LangGraph is only framework that gives durable DAG + checkpoint + human-in-loop natively — avoid building custom orchestrator
 - Postgres + pgvector avoids adding separate vector DB (Qdrant) for MVP
 - Redis is needed for realtime pubsub + stream persistence, also cheap cache
 - No Celery: asyncio + LangGraph checkpoint + Redis Streams enough for MVP concurrency
+- Lightweight ModelProvider (OpenAI-compatible, Anthropic, Ollama) avoids heavy LiteLLM dep, but Arena/OpenAI-compatible still fits
+- SandboxService abstraction ensures agents never get unrestricted host shell/file access; container isolation only where needed
+- MCP via stdio (local) + Streamable HTTP (remote) is current spec, SSE only as legacy compat note
 
 ### 8. Agent Architecture
 
@@ -487,64 +509,72 @@ stateDiagram-v2
 
 ### 13. MCP Architecture
 
-**What is MCP:** Model Context Protocol — standard for exposing tools/resources/prompts via servers.
+**What is MCP:** Model Context Protocol — standard for exposing tools/resources/prompts via servers. Current spec uses **stdio for local** and **Streamable HTTP for remote**. SSE is legacy compatibility only.
 
-**NexusOS MCP Design:**
+**NEXUS (codename) MCP Design:**
 
 ```mermaid
 graph LR
     subgraph NexusOS Backend
         Registry[Tool Registry]
         Perm[Permission Engine]
-        MCPMgr[MCP Manager<br/>Client Pool]
+        MCPMgr[MCP Manager<br/>Client Pool<br/>stdio + Streamable HTTP]
         Proxy[MCP Proxy Tool]
+        Sandbox[SandboxService]
     end
 
     subgraph MCP Servers
-        FS[Filesystem MCP]
-        Fetch[Fetch/Web MCP]
-        GitHub[GitHub MCP]
-        PostgresMCP[Postgres MCP]
-        Custom[Custom MCP]
+        FS[Filesystem MCP<br/>stdio local]
+        Fetch[Fetch/Web MCP<br/>Streamable HTTP]
+        GitHub[GitHub MCP<br/>Streamable HTTP]
+        PostgresMCP[Postgres MCP<br/>Streamable HTTP]
+        Custom[Custom MCP<br/>stdio]
     end
 
     Registry --> MCPMgr
-    MCPMgr -- stdio/SSE --> FS
-    MCPMgr -- SSE --> Fetch
-    MCPMgr -- SSE --> GitHub
-    MCPMgr -- SSE --> PostgresMCP
+    MCPMgr -- stdio --> FS
+    MCPMgr -- Streamable HTTP --> Fetch
+    MCPMgr -- Streamable HTTP --> GitHub
+    MCPMgr -- Streamable HTTP --> PostgresMCP
     MCPMgr -- stdio --> Custom
     MCPMgr --> Proxy
     Proxy --> Registry
     Perm --> Proxy
+    Proxy --> Sandbox
 ```
 
 **MCP Manager:**
-- Maintains persistent connections to configured MCP servers (stdio for local, SSE/HTTP for remote)
+- Maintains persistent connections to configured MCP servers:
+  - **stdio** for local servers (spawned as child processes, managed lifecycle)
+  - **Streamable HTTP** for remote servers (HTTP POST with streaming response, per current MCP spec)
+  - **SSE is legacy only** — may be mentioned for compatibility with older servers, but not used for new design
 - On startup, calls `list_tools`, `list_resources`, `list_prompts` for each server
 - Registers discovered tools in Tool Registry with source=mcp, server_id, capability tags
 - Handles health checks, reconnect, versioning
-- Config stored in Postgres `mcp_servers` table: id, name, transport, command/url, env (secret refs), enabled, status
+- Config stored in Postgres `mcp_servers` table: id, name, transport (stdio | streamable_http | sse_legacy), command/url, env (secret refs), enabled, status
+- Arena/OpenAI-compatible tool calls fit behind same abstraction via ModelProvider
 
 **Tool Proxy:**
 - When agent calls MCP tool, request goes via Proxy which:
   1. Checks permission (tool allowed for this agent/mission)
-  2. Checks approval needed
+  2. Checks approval needed (balanced policy, shell always approval)
   3. Injects secrets from vault (not via LLM)
-  4. Calls MCP server via Manager
+  4. Calls MCP server via Manager (stdio or Streamable HTTP)
   5. Validates output (size limit, schema, no secret leakage)
   6. Logs audit, emits event
+  7. If command execution required, routes via SandboxService (container isolation)
 
 **Security:**
-- MCP servers run sandboxed (Docker, gVisor in advanced)
-- Filesystem MCP restricted to `/workspace` sandbox
+- MCP servers run via SandboxService where needed (container isolation, not unrestricted host access)
+- Filesystem MCP restricted via SandboxService abstraction, not raw host chroot assumption; allowed paths scoped per mission via SandboxService policy
 - Network MCP allowlist
 - Tool output size capped (1MB), truncated with warning
+- Agents never receive unrestricted host shell/file access
 
 **MVP MCP Servers:**
-- Filesystem (read/write limited to sandbox, approval for write)
-- Fetch (web fetch, allowlist, no private IPs)
-- Optional: GitHub (read-only)
+- Filesystem (read/write limited to SandboxService sandbox, approval for write)
+- Fetch (web fetch via Streamable HTTP, allowlist, no private IPs)
+- Optional: GitHub (read-only, Streamable HTTP)
 
 ### 14. Tool Permission Model
 
@@ -585,9 +615,20 @@ graph LR
   "capability_tags": ["filesystem", "write"],
   "risk_level": "high",
   "default_permission": "approval_required",
-  "sandbox_config": { "allowed_paths": ["/workspace"] }
+  "sandbox_config": { 
+    "service": "SandboxService",
+    "isolation": "container",
+    "allowed_paths": ["mission_workspace"],
+    "note": "No unrestricted host access, enforced via SandboxService"
+  }
 }
 ```
+
+**SandboxService Abstraction (NEW):**
+- Interface: `SandboxService` with methods `create_workspace(mission_id)`, `read_file()`, `write_file()`, `exec_command()` (container-isolated), `cleanup()`
+- MVP implementation: For file tools, uses scoped workspace directory managed by service; for shell/exec, spawns ephemeral container (Docker / gVisor-like) with no network, limited CPU/mem, read-only root except workspace, timeout 30s
+- Agents never receive unrestricted host shell/file access — all access goes via SandboxService
+- Policy enforced centrally, not via ad-hoc chroot assumption
 
 **UX for Permissions:**
 - Settings page shows matrix: Agent Types x Tools with permission level
@@ -663,11 +704,11 @@ graph TB
 graph LR
     Upload[Upload Docs] --> Parse[Parse<br/>PyMuPDF/docx]
     Parse --> Chunk[Chunk<br/>512 tokens, 50 overlap<br/>Recursive splitter]
-    Chunk --> Embed[Embed<br/>text-embedding-3-small<br/>or bge-small local]
+    Chunk --> Embed[Embed<br/>Local-first provider<br/>e.g. bge-small / nomic<br/>replaceable]
     Embed --> Store[(PG + pgvector)]
     Store --> Index[IVFFlat Index]
 
-    Query[Agent RAG Query] --> QEmbed[Query Embed]
+    Query[Agent RAG Query] --> QEmbed[Query Embed<br/>Local-first]
     QEmbed --> Search[Hybrid Search<br/>Vector + BM25]
     Search --> Rerank[Rerank<br/>Cross-encoder<br/>Optional]
     Rerank --> Context[Context Injection<br/>Top 5, with citations]
@@ -678,8 +719,9 @@ graph LR
 - Supported: .md, .txt, .pdf, .docx (MVP)
 - Chunking: Recursive character splitter, 512 tokens, 50 overlap, preserve markdown structure
 - Metadata: source file, page, chunk index, upload user, collection id
-- Embeddings: 1536 dim for OpenAI, 384 for local bge-small — need to handle multiple dims? For MVP, single model, 1536
+- Embeddings: **Local-first provider** (selected default D2) — e.g., `bge-small-en-v1.5` (384 dim) or `nomic-embed-text` via Ollama, runs locally, free, replaceable later with OpenAI `text-embedding-3-small` (1536 dim) or other provider. Abstraction allows swapping via config. For MVP, single model dimension, configurable.
 - Collections: User can create collections (e.g., "Product Docs"), link to mission
+- Embedding abstraction: `EmbeddingProvider` interface with `embed(texts) -> vectors`, implementations: Local (Ollama/SentenceTransformers), OpenAI-compatible, etc.
 
 **Retrieval Details:**
 - Hybrid: vector similarity (cosine) + keyword (Postgres tsvector)
@@ -795,12 +837,13 @@ CREATE TABLE tool_registry (
 );
 
 -- MCP servers
+-- Transport: stdio for local, streamable_http for remote (current spec), sse as legacy compat only
 CREATE TABLE mcp_servers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
-  transport TEXT CHECK (transport IN ('stdio','sse','http')),
+  transport TEXT CHECK (transport IN ('stdio','streamable_http','sse_legacy')),
   command TEXT, -- for stdio
-  url TEXT, -- for sse/http
+  url TEXT, -- for streamable_http / legacy sse
   env JSONB, -- secret refs, not raw secrets
   enabled BOOLEAN DEFAULT true,
   status TEXT DEFAULT 'disconnected',
@@ -1038,22 +1081,24 @@ sequenceDiagram
    - Agent sees only tools it needs (filtered in system prompt + runtime check)
    - Arg validation via JSONSchema + custom validators
 
-2. **Filesystem Restrictions:**
-   - All file tools chrooted to `/workspace/{mission_id}` sandbox
-   - Symlink resolution blocked
-   - Path traversal detection
-   - Write outside sandbox requires approval + audit
+2. **Filesystem Restrictions via SandboxService:**
+   - All file tools go via SandboxService abstraction, NOT raw chroot assumption
+   - SandboxService manages per-mission workspace (e.g., scoped directory or volume) with policy enforcement
+   - Symlink resolution blocked, path traversal detection via SandboxService
+   - Write outside allowed workspace requires approval + audit, enforced by service
+   - Agents never receive unrestricted host file access
 
 3. **Network Restrictions:**
    - Fetch tool allowlist (no 169.254.0.0/16, 10.0.0.0/8, etc.)
    - No private IP, no metadata service
    - Rate limited, size capped
 
-4. **Command Execution:**
-   - Shell tool disabled by default, approval_required
-   - Runs in gVisor-like sandbox (MVP: Docker with no network, limited CPU/mem, read-only root except workspace)
+4. **Command Execution via SandboxService (Container Isolation):**
+   - Shell tool disabled by default, approval_required (balanced policy, shell always approval per D6)
+   - MVP implementation uses container isolation where command execution is required: ephemeral container (Docker / gVisor-like) with no network or limited, CPU 0.5, memory 512MB, read-only root except workspace, timeout 30s, no privileged
+   - SandboxService is sole interface for exec: `exec_command(mission_id, cmd, timeout)` — agents never get host shell
    - Command denylist: `rm -rf /`, `mkfs`, etc.
-   - Timeout 30s
+   - All commands logged, output size capped
 
 5. **Secret Isolation:**
    - Secrets never injected into prompt, only via tool env
@@ -1306,7 +1351,7 @@ GET    /api/v1/metrics (Prometheus)
 
 ### 28. Frontend Architecture
 
-**Stack:** Next.js 14 App Router, TypeScript 5, Tailwind CSS, shadcn/ui, Framer Motion, Zustand, TanStack Query, React Three Fiber, Drei, Zod.
+**Stack (Updated per Review):** Next.js 16.x + React 19 + TypeScript + React Three Fiber 9 + Three.js + Drei + Tailwind CSS + shadcn/ui + Zustand + TanStack Query + Framer Motion + Zod. Target current stable-compatible architecture, do not hard-pin patch versions.
 
 **Structure:**
 ```
@@ -1316,7 +1361,7 @@ apps/web/
     (dashboard)/
       layout.tsx # sidebar + header
       page.tsx # missions list
-      missions/[id]/page.tsx # mission control (2D + 3D)
+      missions/[id]/page.tsx # mission control (2D + 3D runtime focus)
       settings/tools/page.tsx
       settings/memory/page.tsx
   components/
@@ -1324,14 +1369,14 @@ apps/web/
     mission/ # MissionCard, MissionTimeline
     agent/ # AgentDetailPanel, AgentStateBadge
     approval/ # ApprovalGate, ApprovalModal
-    memory/ # MemorySearch, MemoryCard
+    memory/ # MemorySearch, MemoryCard (abstracted, not raw vector DB viz)
     rag/ # RAGUpload, RAGSearch
     observability/ # CostBurn, TraceView
   lib/
     api/ # generated client from OpenAPI
     ws/ # useWebSocket hook
     store/ # zustand stores
-    3d/ # scene, hooks, shaders
+    3d/ # scene, hooks, shaders - focus on agents, tasks, workflows, tool activity, approval gates
   hooks/
   styles/
 ```
@@ -1352,15 +1397,17 @@ apps/web/
 - Color palette: slate/zinc base, accent: violet or cyan desaturated (e.g., `hsl(240 5% 6%)` bg, `hsl(262 83% 58%)` accent muted)
 - Typography: Inter or Geist Sans, JetBrains Mono for code
 - Motion: Framer Motion for subtle entrance, not bouncy
+- Codename note: NEXUS is temporary internal codename, public name to be finalized later
 
 **Performance:**
 - Dynamic import for 3D canvas (`next/dynamic` ssr false)
 - Code splitting by route
 - Image optimization via next/image
+- 3D focused on runtime state only, not full memory/vector DB rendering (per review)
 
 ### 29. 3D Rendering Architecture
 
-**Core:** Three.js r160+, React Three Fiber 8+, Drei 9+, Zustand for 3D state, Framer Motion 3D for animations.
+**Core:** Three.js (current stable) + React Three Fiber 9 + Drei (current stable) + React 19 + Next.js 16.x + Zustand for 3D state + Framer Motion 3D for animations. No hard-pinned patch versions, target current stable-compatible.
 
 **Renderer Setup:**
 - `<Canvas>` with `dpr={[1,2]}`, `gl={{ antialias: true, powerPreference: "high-performance" }}`, `shadows={false}` for MVP (enable later)
@@ -1368,7 +1415,7 @@ apps/web/
 - `EffectComposer` optional for bloom (subtle, not neon)
 - `Environment` with HDRI for soft lighting, not gaming
 
-**Scene Graph:**
+**Scene Graph (Runtime-Focused per Review):**
 ```
 <Canvas>
   <Suspense>
@@ -1376,18 +1423,23 @@ apps/web/
       <Lighting />
       <MissionCore /> # central orb representing mission
       <AgentCluster>
-        <AgentNode /> x N # instanced mesh for performance
+        <AgentNode /> x N # instanced mesh for performance - runtime agents
       </AgentCluster>
-      <WorkflowSplines /> # CatmullRom curves for dependencies
-      <MemoryCluster /> # orbiting memory orbs
-      <EventParticles /> # particles for tool calls/handoffs
-      <ApprovalGates /> # hex portals on edges
+      <TaskNodes /> # active tasks, layered DAG
+      <WorkflowSplines /> # CatmullRom curves for dependencies/workflows
+      <ToolActivity /> # particles/beams for tool calls - runtime only
+      <ApprovalGates /> # hex portals on edges - runtime approval state
+      <EventParticles /> # particles for handoffs/tool activity
       <Grid /> # subtle ground grid, fog
+      # Note: Memory/vector DB NOT rendered as raw 3D nodes. 
+      # Optional abstract indicator for memory activity (e.g., subtle pulse on core) but not full DB.
     </Scene>
     <OrbitControls />
   </Suspense>
 </Canvas>
 ```
+
+**Design Principle (Updated):** 3D scene focuses on mission runtime state — agents, active tasks, workflows, tool activity, approval gates. Do NOT attempt to render entire memory/vector database as raw 3D nodes. Memory activity can be visualized abstractly (e.g., beam or core pulse) but not as 50-100 individual orbs representing DB entries.
 
 **Instancing for Performance:**
 - Agents: `InstancedMesh` with 50 instances, per-instance color via InstancedBufferAttribute for state
@@ -1412,15 +1464,16 @@ apps/web/
 
 ### 30. 3D Scene Design
 
-**Layout Concept: Orbital Command Deck**
+**Layout Concept: Orbital Command Deck - Hybrid Orbital Agents + Layered Task DAG (Selected D5)**
 
-- **Center:** Mission Core — large translucent orb with mission title, status ring, cost indicator. Slight rotation, inner core glows based on overall mission health (green=on track, amber=needs attention, red=failed).
-- **Inner Orbit (radius 3):** Active Agents — 3-8 orbs/pillars orbiting slowly around core. Each agent node is distinct: geometry = icosahedron or rounded cube, size = workload, height = importance. Orbit speed = activity (faster when running).
-- **Middle Orbit (radius 6):** Task Nodes — smaller nodes representing tasks, connected via splines to agents and dependencies. Layout in layers by DAG depth (left to right or circular). Completed tasks settle to lower plane.
-- **Outer Orbit (radius 9):** Memory Cluster — cloud of small orbs (memory entries), orbiting slowly, with beams to agents when accessed.
-- **Edges:** Workflow Splines — curved lines between tasks, with animated particles flowing direction of dependency. Color = status (grey=pending, violet=running, green=completed, red=failed).
-- **Approval Gates:** Hexagonal torus on spline, amber when pending, opens when approved.
+- **Center:** Mission Core — large translucent orb with mission title, status ring, cost indicator. Slight rotation, inner core glows based on overall mission health (green=on track, amber=needs attention, red=failed). Optional subtle pulse indicates memory/RAG activity abstractly, not raw DB nodes.
+- **Inner Orbit (radius 3):** Active Agents — 3-8 orbs/pillars orbiting slowly around core. Each agent node is distinct: geometry = icosahedron or rounded cube, size = workload, height = importance. Orbit speed = activity (faster when running). This is primary runtime focus.
+- **Middle Orbit (radius 6):** Task Nodes — smaller nodes representing active tasks, connected via splines to agents and dependencies. Layout in layers by DAG depth (left to right or circular layered). Completed tasks settle to lower plane. This is layered DAG part of hybrid design.
+- **Edges:** Workflow Splines — curved lines between tasks, with animated particles flowing direction of dependency. Color = status (grey=pending, violet=running, green=completed, red=failed). Represents workflow runtime.
+- **Tool Activity:** Particles/beams from agents indicating tool calls — runtime focus, not memory DB.
+- **Approval Gates:** Hexagonal torus on spline, amber when pending, opens when approved. Runtime approval state.
 - **Ground:** Subtle grid with fog, not dominant.
+- **Explicitly NOT Included as Raw 3D Nodes:** Entire memory/vector database, RAG chunks, long-term memory entries as individual orbs. Per review, 3D focuses on mission runtime state only. Memory/RAG activity visualized abstractly (e.g., brief beam to core or indicator) rather than 50-100 memory orbs.
 
 **Camera Behavior:**
 - Default: 45-degree angle, looking at core, distance 15
@@ -1786,41 +1839,44 @@ nexus-os/
 
 ### 38. Deployment Architecture
 
-**MVP: Docker Compose on single VM (e.g., Hetzner, Fly.io, Render)**
+**MVP Deployment Target: Docker Compose (Selected D7) — No Cloud Vendor Commitment Yet**
+
+Per review, MVP deployment target is Docker Compose. Do not commit to Fly.io, Hetzner, Vercel/Render, etc. yet. Kubernetes remains a future deployment option.
 
 ```
-Host VM
-├── Caddy / Traefik (reverse proxy, TLS)
-├── web (Next.js standalone, port 3000)
+Docker Compose (MVP)
+├── web (Next.js 16.x standalone, port 3000)
 ├── api (FastAPI uvicorn, port 8000, 2 workers)
-├── postgres (16 + pgvector, volume)
-├── redis (7, volume, AOF)
+├── postgres (Postgres + pgvector, volume)
+├── redis (Redis, volume, AOF)
 ├── otel-collector (optional)
-└── mcp-servers (sidecar containers, stdio via docker exec or separate)
+└── mcp-servers (sidecar containers, stdio local + Streamable HTTP remote)
+    └── sandbox-runner (ephemeral containers for SandboxService exec)
 ```
 
-**Docker Compose:**
-- `web` builds from `apps/web/Dockerfile` (multi-stage, standalone output)
-- `api` builds from `apps/api/Dockerfile` (python 3.12 slim, uvicorn)
+**Docker Compose (MVP):**
+- `web` builds from `apps/web/Dockerfile` (multi-stage, standalone output, Next.js 16.x)
+- `api` builds from `apps/api/Dockerfile` (Python 3.12 slim, uvicorn)
+- `postgres` with pgvector extension, volume for data
+- `redis` with AOF, volume
 - Healthchecks for all
-- Env via `.env` file, secrets via Docker secrets
+- Env via `.env` file, secrets via Docker secrets or env file, never in code
+- No commitment to specific cloud provider for MVP — runs on any Docker host (local, VM, etc.)
+- SandboxService uses Docker socket or container runtime to spawn ephemeral isolation containers for shell/file exec
 
-**Production Future: Kubernetes**
-- API deployment with 3 replicas, HPA on CPU + queue length
-- Web as static on Vercel or same cluster
-- Postgres managed (Neon, Supabase, RDS with pgvector)
-- Redis managed (Upstash, Elasticache)
-- Separate worker deployment for agent runner (scales independently)
-- Ingress + cert-manager
-- OTel Collector DaemonSet -> Tempo/Jaeger, Prometheus, Loki
+**Future Deployment Option: Kubernetes (Not MVP)**
+- Kubernetes remains a future deployment option, not MVP commitment
+- Potential future: API deployment with replicas, HPA, Postgres managed, Redis managed, separate worker for agent runner, Ingress + cert-manager, OTel Collector DaemonSet
+- No cloud vendor lock-in decision yet
 
-**CI/CD:**
-- GitHub Actions: on push to main, build images, push to GHCR, deploy via SSH or Fly/Render hook
-- Migrations run as init container / job
+**CI/CD (MVP):**
+- GitHub Actions: lint, type check, test, build Docker images
+- Migrations run as init container / job via Alembic
+- Deploy via Docker Compose on any host, no vendor-specific hooks committed yet
 
-**Cost Control MVP:**
-- Single VM $20-40/mo handles 10 concurrent missions
-- Use cheap embedding model or local for RAG to save cost
+**Cost/Resource Notes:**
+- MVP targets single Docker Compose stack handling 10 concurrent missions
+- Use local embedding provider first (selected D2) to reduce cost, replaceable later
 
 ### 39. Local Development Architecture
 
@@ -1913,13 +1969,14 @@ ENV=development
 - Auto-orbit: Optional toggle, slow 0.05 rad/s around core when idle, pauses on interaction
 - Shake: On failure, subtle camera shake (0.1 intensity, 200ms)
 
-**Scene Layout:**
+**Scene Layout (Runtime-Focused, Hybrid D5):**
 - Ground: Plane 100x100, color #0f0f10, grid helper with divisions 50, opacity 0.1, fog blends
-- Mission Core: Sphere 1.5 radius, MeshPhysicalMaterial transmission 0.2, clearcoat 1, emissive based on status, inner smaller sphere with shader noise
-- Agent Orbit: Radius 3 + index*0.3 to avoid overlap, y = 0.5 + sin(time+index)*0.2, speed 0.2 + activity*0.5
-- Task Layout: For MVP, circular layered: layer = topological depth, angle = indexInLayer / count * 2π, radius = 6 + layer*1.5, y = 0
-- Memory Cluster: Spherical random distribution radius 9-11, 50-100 orbs size 0.05-0.15, slow orbit
+- Mission Core: Sphere 1.5 radius, MeshPhysicalMaterial transmission 0.2, clearcoat 1, emissive based on status, inner smaller sphere with shader noise. Optional abstract pulse for memory/RAG activity, not raw DB.
+- Agent Orbit: Radius 3 + index*0.3 to avoid overlap, y = 0.5 + sin(time+index)*0.2, speed 0.2 + activity*0.5 — primary runtime focus
+- Task Layout: For MVP, layered DAG: layer = topological depth, angle = indexInLayer / count * 2π, radius = 6 + layer*1.5, y = 0 — hybrid design
 - Workflow Splines: CatmullRomCurve3 with 20 points, tube geometry radius 0.02, color based on status, particle flow via shader uniform time
+- Tool Activity: Particles/beams from agents for tool calls, approval gates on edges
+- Memory: NOT rendered as 50-100 raw orbs. If needed, abstract indicator (e.g., brief beam to core or subtle ring) for memory/RAG activity, per review feedback.
 - Lighting: Ambient 0.4, directional from [5,10,5] intensity 0.8, point at core intensity 0.5, no shadows MVP
 
 **Agent Representation:**
@@ -1950,10 +2007,13 @@ ENV=development
 - Success: particle reaches target and emits small burst
 - Failure: particle turns red and falls
 
-**Memory Visualization:**
-- Memory Cluster: group of small spheres, each memory entry = orb, size based on importance, color based on type (fact=violet, artifact=cyan, summary=emerald)
-- RAG query: beam (Line with shader) from agent to cluster, then 5 closest chunks highlight (scale up, emissive)
-- Shared memory: when agent writes, new orb spawns with animation (scale from 0 to 1)
+**Memory Visualization (Abstracted per Review - No Raw Vector DB Nodes):**
+- Per review, 3D scene focuses on mission runtime state: agents, active tasks, workflows, tool activity, approval gates. Do NOT render entire memory/vector database as raw 3D nodes.
+- Memory/RAG activity visualization (abstracted):
+  - RAG query: brief beam from agent to Mission Core (or subtle indicator), plus UI side panel shows retrieved chunks with citations (2D). No cluster of 50-100 orbs.
+  - Shared memory write: subtle pulse on Mission Core or agent, plus event in timeline. No spawning of new orbs for each memory entry.
+  - If needed for demo, single abstract "memory activity" ring around core that pulses when RAG/memory accessed, not full DB.
+- Rationale: Rendering raw vector DB is expensive, cluttered, and not runtime-focused. Keep 3D for orchestration legibility.
 
 **Event Animations:**
 - Handoff: particle moving along spline from source agent to target, color #a78bfa, trail via Points
@@ -2182,22 +2242,25 @@ ENV=development
    - Arg pattern triggers: e.g., shell command contains `rm -rf`, `curl | sh`, etc. -> auto deny + alert
    - Approval UI shows full context, diff, risk
 
-4. **Filesystem Restrictions:**
-   - Chroot to `/workspace/{mission_id}`, enforced via path resolution + symlink check
-   - No `..` traversal, no absolute paths outside
-   - Write outside requires approval + audit
-   - Read-only mount for code, write only to output
+4. **Filesystem Restrictions via SandboxService:**
+   - All filesystem access via SandboxService abstraction, not raw chroot assumption
+   - SandboxService enforces per-mission workspace isolation, path resolution, symlink blocking, traversal detection
+   - No `..` traversal, no absolute paths outside allowed workspace, enforced by service
+   - Write outside requires approval + audit, enforced by service
+   - Agents never receive unrestricted host file access — only via SandboxService API
 
 5. **Network Restrictions:**
    - Fetch tool: allowlist domains (configurable), block private IPs (10/8, 172.16/12, 192.168/16, 169.254/16, 127/8), block metadata service
    - Rate limit 10 req/min per mission, size cap 1MB
    - No raw socket, no DNS rebinding
+   - MCP remote via Streamable HTTP respects same allowlist
 
-6. **Command Execution Restrictions:**
-   - Shell tool disabled by default, enable per mission with approval
-   - Runs in Docker container with: no network (or limited), CPU 0.5, memory 512MB, read-only root except workspace, timeout 30s, no privileged
+6. **Command Execution Restrictions via SandboxService (Container Isolation):**
+   - Shell tool disabled by default, approval_required always (per D6 balanced policy)
+   - MVP implementation uses container isolation where command execution is required: SandboxService spawns ephemeral container (Docker / gVisor-like) with no network (or limited), CPU 0.5, memory 512MB, read-only root except workspace, timeout 30s, no privileged
+   - Agents never receive unrestricted host shell access — exec only via SandboxService `exec_command()`
    - Denylist commands: `rm -rf /`, `mkfs`, `dd`, `shutdown`, etc. via regex
-   - All commands logged, output size capped
+   - All commands logged, output size capped, audited
 
 7. **Secret Isolation:**
    - Secrets stored in env, not in DB plaintext, not in prompt
@@ -2367,29 +2430,31 @@ stateDiagram-v2
     running --> cancelled
 ```
 
-#### MCP Architecture
+#### MCP Architecture (Updated: stdio + Streamable HTTP, SSE legacy only)
 ```mermaid
 graph LR
     subgraph Backend
         Registry[Tool Registry]
         Perm[Permission Engine]
-        MCPMgr[MCP Manager Pool]
+        MCPMgr[MCP Manager Pool<br/>stdio + Streamable HTTP]
         Proxy[MCP Proxy]
+        Sandbox[SandboxService]
     end
     subgraph Servers
-        FS[Filesystem MCP]
-        Fetch[Fetch MCP]
-        GitHub[GitHub MCP]
-        PGmcp[Postgres MCP]
+        FS[Filesystem MCP<br/>stdio local]
+        Fetch[Fetch MCP<br/>Streamable HTTP]
+        GitHub[GitHub MCP<br/>Streamable HTTP]
+        PGmcp[Postgres MCP<br/>Streamable HTTP]
     end
     Registry --> MCPMgr
-    MCPMgr -- stdio/SSE --> FS
-    MCPMgr -- SSE --> Fetch
-    MCPMgr -- SSE --> GitHub
-    MCPMgr -- SSE --> PGmcp
+    MCPMgr -- stdio --> FS
+    MCPMgr -- Streamable HTTP --> Fetch
+    MCPMgr -- Streamable HTTP --> GitHub
+    MCPMgr -- Streamable HTTP --> PGmcp
     MCPMgr --> Proxy
     Proxy --> Registry
     Perm --> Proxy
+    Proxy --> Sandbox
 ```
 
 #### RAG Pipeline
@@ -2516,15 +2581,17 @@ graph LR
 
 ---
 
-### 45. Final Recommendations
+### 45. Final Recommendations (Updated per Review Feedback)
 
-#### 1. Recommended Project Name / Branding Direction
+#### 1. Recommended Project Name / Branding Direction (Temporary Codename)
 
-**Name: NexusOS** — Keep, it's strong. Alternative short: **NEXUS**.
+**Name: NEXUS / NexusOS is internal repository/project codename only (NOT final public brand).**
 
-**Branding Direction:**
+**Note per Review:** Multiple existing projects already use NexusOS. Keep "NexusOS/NEXUS" as internal codename for now. Public product name will be finalized later. Do NOT claim NexusOS is a final unique public brand.
+
+**Branding Direction (for internal codename):**
 - **Tone:** Premium, technical, calm, mission-control, not sci-fi neon. Think: "The operating system for autonomous work" — similar vibe to Linear, Vercel, Stripe, but with spatial depth.
-- **Logo:** Minimal wordmark + abstract node: interconnected dots forming N, or orbital rings around central point. No gradients, single color, works in dark.
+- **Logo (internal):** Minimal wordmark + abstract node: interconnected dots forming N, or orbital rings around central point. No gradients, single color, works in dark. Final logo to be decided after public name finalization.
 - **Color Palette (Dark Default):**
   - Background: `zinc-950` / `#09090b`
   - Surface: `zinc-900` / `#18181b`
@@ -2538,80 +2605,93 @@ graph LR
   - No pure neon cyan/magenta — use sparingly as data colors only
 - **Typography:** Geist Sans / Inter for UI, JetBrains Mono for code/logs, 14px base, 16px for reading
 - **Visual Language:** Glass morphism subtle (backdrop-blur 12px, border 1px), rounded-xl (12px), soft shadows, not heavy glow. 3D scene uses same palette, low emissive.
-- **Tagline Options:**
+- **Tagline Options (internal):**
   - "Mission Control for AI Agents"
   - "The Operating System for Autonomous Work"
   - "Orchestrate. Observe. Approve."
 
-**Avoid:** Excessive neon, gaming HUD, cyberpunk clutter, copy of other Agent OS branding.
+**Avoid:** Excessive neon, gaming HUD, cyberpunk clutter, copy of other Agent OS branding. Do not use final public branding claims yet.
 
-#### 2. Recommended MVP
+#### 2. Recommended MVP (Planning Estimate Only)
 
-**MVP Scope (6-8 weeks, 1-2 engineers):**
+**MVP Scope (Planning Estimate 6-8 weeks, NOT a commitment, cut list maintained):**
 
 **Core:**
 - Mission CRUD, templates (Research, Code, Analysis, General)
 - Supervisor decomposition via LangGraph, DAG execution, checkpoint in Postgres
-- 3 specialized agents: Researcher (web_search + rag_query + memory_search), Coder (read_file + write_file approval + shell approval), Analyst (memory_search + rag_query + data tools)
-- Tool registry with 8 built-in tools + MCP proxy, permission engine with 3 levels
-- MCP integration: filesystem + fetch servers
+- 3 specialized agents: Researcher (web_search + rag_query + memory_search), Coder (read_file via SandboxService + write_file approval + shell approval via container isolation), Analyst (memory_search + rag_query + data tools)
+- Tool registry with 8 built-in tools + MCP proxy, permission engine with 3 levels, balanced approval policy; shell always approval (D6)
+- MCP integration: filesystem via stdio (local) + fetch via Streamable HTTP (remote), SSE only as legacy compat note
 - Memory: Postgres + pgvector, short + long + RAG collections, upload .md/.txt/.pdf
+- RAG: Local embedding provider first (D2), replaceable later (e.g., bge-small via Ollama / SentenceTransformers), chunk 512/50, retrieve top 5
 - Approvals: tool approval flow, UI modal + 3D gate, timeout auto-deny
 - Realtime: FastAPI WS + Redis Streams/PubSub, event types: agent_state, tool_call, approval, mission_update
 - Audit logs immutable, cost tracking
 - Observability: structlog JSON, OTel console, Prometheus /metrics
+- Model Provider: Lightweight ModelProvider interface with OpenAI-compatible, Anthropic, Ollama; Arena/OpenAI-compatible behind abstraction (D1)
+- SandboxService abstraction with container isolation for command execution; agents never get unrestricted host shell/file access
 
 **Frontend:**
-- Next.js 14, Tailwind, shadcn, Zustand, TanStack Query
-- Pages: Missions list, Mission control (3D + 2D panels), Settings (tools, MCP, memory)
-- 3D: Orbital layout, agent nodes as icosahedrons with state colors, workflow splines, event particles, approval gates, memory cluster, orbit controls, selection + side panel sync, responsive fallback to 2D on mobile
+- Next.js 16.x, React 19, TypeScript, Tailwind, shadcn/ui, Zustand, TanStack Query, React Three Fiber 9, Three.js, Drei (no hard-pinned patch versions, current stable-compatible)
+- Pages: Missions list, Mission control (3D runtime-focused + 2D panels), Settings (tools, MCP, memory)
+- 3D: Hybrid orbital agents + layered task DAG (D5) — orbital for agents, layered for tasks/workflows. Focus on mission runtime state: agents, active tasks, workflows, tool activity, approval gates. Do NOT render entire memory/vector DB as raw 3D nodes. Memory activity abstracted (pulse on core or brief beam). Orbit controls, selection + side panel sync, responsive fallback to 2D on mobile
 - Performance: instanced meshes, 60fps target
 
 **Infra:**
-- Docker Compose: web, api, postgres+pgvector, redis
-- Single VM deploy, Caddy for TLS
+- Docker Compose: web, api, postgres+pgvector, redis, sandbox-runner — MVP deployment target is Docker Compose only (D7), no cloud vendor commitment
+- pnpm workspaces (D3), MIT license (D9), single dev Bearer token (D4)
 
 **Out of MVP:**
 - Multi-tenant, RBAC, SSO
 - Custom agent builder UI
 - Workflow editor
 - Advanced memory consolidation, knowledge graph
-- Kubernetes, autoscaling
-- Voice, advanced shaders, minimap
+- Kubernetes (future option, not MVP)
+- Voice, advanced shaders, minimap, full memory galaxy viz
 - Webhooks, scheduling
 
 **MVP Success Demo Script:**
 1. User creates "Market Research" mission: "Research top 5 AI agent frameworks, compare features, write report"
 2. Supervisor decomposes into 3 tasks: Research, Analyze, Write
-3. 3D scene: core spawns, 3 agents orbit, splines draw
-4. Researcher does web_search + rag_query, particles flow to memory cluster
-5. Analyst synthesizes, handoff visualized
-6. Coder/Writer writes file, approval gate appears, user approves
-7. Mission completes, core turns green, report shown with citations, audit log, cost $0.42
+3. 3D scene: core spawns, 3 agents orbit (hybrid orbital), task DAG splines draw layered
+4. Researcher does web_search + rag_query (local embedding), tool activity particles flow, abstract memory pulse on core
+5. Analyst synthesizes, handoff visualized as particle along spline
+6. Coder/Writer writes file via SandboxService, approval gate appears, user approves
+7. Mission completes, core turns green, report shown with citations, audit log, cost
 
-#### 3. Recommended Technology Stack (Smallest Coherent)
+#### 3. Recommended Technology Stack (Smallest Coherent, Updated)
 
-**Frontend:**
-- Next.js 14 (App Router) + TypeScript 5 + React 18
+**Frontend (Updated per Review):**
+- Next.js 16.x (App Router) + React 19 + TypeScript (no hard-pinned patch versions, target current stable-compatible)
 - Tailwind CSS + shadcn/ui + Radix primitives
-- Zustand (client state) + TanStack Query v5 (server state) + Zod (validation)
-- Three.js + React Three Fiber 8 + Drei 9 + Framer Motion 3D
+- Zustand (client state) + TanStack Query (server state) + Zod (validation)
+- Three.js (current stable) + React Three Fiber 9 + Drei (current stable) + Framer Motion 3D
 - next-themes for dark mode, next/font for Geist
 - orval or openapi-typescript for API types
+- pnpm (D3)
 
 **Backend:**
 - Python 3.12 + FastAPI + Pydantic v2 + SQLAlchemy 2 async + Alembic
 - LangGraph + LangChain Core (minimal) for orchestration
-- MCP Python SDK (official)
-- PostgreSQL 16 + pgvector 0.7 + asyncpg
-- Redis 7 (Streams + PubSub)
-- LiteLLM-inspired custom provider abstraction (wrapper around openai, anthropic SDKs) — avoid heavy LiteLLM dep for MVP, implement 200-line wrapper
+- MCP Python SDK (official) — stdio for local, Streamable HTTP for remote, SSE legacy compat only
+- PostgreSQL + pgvector + asyncpg (versions not hard-pinned, current stable)
+- Redis (Streams + PubSub)
+- **Lightweight ModelProvider abstraction (D1):**
+  ```
+  ModelProvider (interface)
+   ├── OpenAICompatibleProvider (OpenAI, Groq, Arena/OpenAI-compatible, etc.)
+   ├── AnthropicProvider
+   └── OllamaProvider (local)
+  ```
+  Arena/OpenAI-compatible access fits behind OpenAI-compatible provider. No heavy LiteLLM dep, ~200-line wrapper with methods: `chat()`, `embed()` (if needed), `stream_chat()`, cost tracking
+- **Embedding Provider (D2 local-first):** Local first (Ollama `nomic-embed-text` or `bge-small` via SentenceTransformers), replaceable via config with OpenAI-compatible later. Interface `EmbeddingProvider.embed(texts)`
+- **SandboxService (NEW):** Abstraction for all file/shell access, container isolation for exec. Agents never get unrestricted host access.
 - Structlog + OpenTelemetry Python SDK + Prometheus client
-- Uvicorn + Gunicorn (or just uvicorn workers)
+- Uvicorn
 
 **Infrastructure:**
-- Docker + Docker Compose (MVP), Kubernetes manifests (future)
-- Caddy or Traefik for reverse proxy + TLS
+- Docker + Docker Compose (MVP deployment target, D7) — no cloud vendor commitment yet
+- Kubernetes manifests as future option, not MVP
 - GitHub Actions for CI
 
 **Tooling:**
@@ -2625,74 +2705,91 @@ graph LR
 - No separate vector DB (pgvector enough for <1M vectors)
 - No Celery (asyncio + Redis Streams enough)
 - No extra queue (Redis)
-- No heavy LLM abstraction (custom wrapper)
-- No separate auth service (single token MVP)
+- Lightweight ModelProvider + EmbeddingProvider (replaceable, local-first)
+- SandboxService ensures no unrestricted host access
+- MCP current spec (stdio + Streamable HTTP) not legacy SSE
+- No separate auth service (single dev Bearer token MVP per D4)
 - No separate frontend state library beyond Zustand + TanStack
 
 **Alternatives Considered & Rejected:**
-- Qdrant/Milvus: extra infra, not needed for MVP
+- Qdrant/Milvus: extra infra, not needed for MVP (but migration path kept)
 - Celery: adds complexity, LangGraph checkpoint + asyncio sufficient
-- Socket.IO: native WS simpler, no need for fallback
+- Socket.IO: native WS simpler
 - Redux: overkill, Zustand simpler
-- Prisma: Python backend, not needed
+- Hard-pinned versions: rejected per review, target stable-compatible
+- SSE for MCP: rejected as primary, only legacy compat
 
-#### 4. Final Architecture Summary
+#### 4. Final Architecture Summary (Updated)
 
-NexusOS is a **layered, event-driven, zero-trust agent OS**:
+**Codename NEXUS** is a **layered, event-driven, zero-trust agent OS** (internal codename, public name TBD):
 
-- **Presentation:** Next.js + R3F 3D that is a live view of runtime state, not decorative. Zustand + TanStack Query, shadcn for premium but calm UI.
-- **API:** FastAPI REST + WS gateway, Pydantic validation, Bearer auth, OpenAPI.
+- **Presentation:** Next.js 16.x + React 19 + R3F 9 + Drei + Tailwind + shadcn, 3D is live view of mission runtime state (agents, active tasks, workflows, tool activity, approval gates), not decorative and not full vector DB rendering. Zustand + TanStack Query, calm premium UI.
+- **API:** FastAPI REST + WS gateway, Pydantic validation, single dev Bearer token (D4), OpenAPI.
 - **Orchestration:** LangGraph with Postgres checkpoint, Supervisor decomposes mission to DAG, assigns to specialized agents, monitors, replans.
-- **Agent Runtime:** BaseAgent with state machine, specialized agents (Researcher, Coder, Analyst), model provider abstraction, tool registry with permission engine, MCP manager for external tools.
-- **Tools & Security:** Least-privilege, approval gates, FS/network sandbox, secret isolation, prompt-injection defenses, output validation.
-- **Memory & RAG:** Postgres + pgvector for all memory types, hybrid search, ingestion pipeline, citation tracking.
-- **Event Bus:** Redis Streams (durable) + PubSub (ephemeral), standardized event envelope, WS gateway pushes to frontend <500ms.
-- **Persistence:** Postgres 16 + pgvector, SQLAlchemy async, Alembic.
-- **Observability:** OTel traces (mission -> task -> agent step -> tool), Prometheus metrics, structlog JSON, cost tracking.
-- **3D:** Orbital command deck layout, agent nodes with state colors/pulse, workflow splines with particles, approval gates, memory cluster, orbit controls, selection sync with 2D panels, instanced meshes for 60fps, mobile fallback to 2D.
+- **Agent Runtime:** BaseAgent with state machine, specialized agents (Researcher, Coder, Analyst), ModelProvider lightweight abstraction (OpenAI-compatible incl. Arena, Anthropic, Ollama), tool registry with permission engine (balanced, shell always approval D6), MCP manager (stdio + Streamable HTTP), SandboxService (container isolation).
+- **Tools & Security:** Least-privilege, approval gates, SandboxService abstraction (no unrestricted host shell/file access), secret isolation, prompt-injection defenses, output validation.
+- **Memory & RAG:** Postgres + pgvector for all memory types, hybrid search, ingestion pipeline with local-first embedding provider (D2), citation tracking.
+- **Event Bus:** Redis Streams (durable) + PubSub (ephemeral), standardized envelope, WS push <500ms.
+- **Persistence:** Postgres + pgvector, SQLAlchemy async, Alembic.
+- **Observability:** OTel traces, Prometheus metrics, structlog JSON, cost tracking.
+- **3D:** Hybrid orbital agents + layered task DAG (D5) — orbital for agents (radius 3), layered for tasks (radius 6 + layer), workflow splines with particles, tool activity particles, approval gates as hex portals, Mission Core central orb. Focus on runtime only, no raw memory/vector DB nodes. Instanced meshes for 60fps, mobile fallback to 2D.
+- **Deployment:** Docker Compose only for MVP (D7), no cloud vendor commitment. Kubernetes future option.
+- **Naming:** NEXUS temporary codename (D8), public name to be finalized later due to existing NexusOS projects.
+- **License:** MIT (D9)
+- **Next Step:** Scaffold repository first (D10) after approval, no app code yet.
 
-**Key Design Decisions:**
-- LangGraph for durable orchestration + human-in-loop (avoid custom DAG engine)
-- Postgres + pgvector over separate vector DB for simplicity
-- Redis for both cache and realtime (avoid Kafka for MVP)
-- R3F over raw Three.js for React integration
-- Monorepo with shared types for type safety
+**Key Design Decisions (Recorded D1-D10):**
+- D1: Custom lightweight ModelProvider (OpenAI-compatible, Anthropic, Ollama), Arena behind compat
+- D2: Local embedding provider first, replaceable later
+- D3: pnpm
+- D4: Single dev Bearer token
+- D5: Hybrid orbital agents + layered task DAG
+- D6: Balanced approval policy; shell always approval
+- D7: Docker Compose first, no vendor commitment
+- D8: NEXUS temporary codename, public name TBD
+- D9: MIT
+- D10: Scaffold repository first after approval
 
-#### 5. Final Repository Structure
+#### 5. Final Repository Structure (Updated)
 
 ```
-nexus-os/
+nexus-os/ (internal codename, public name TBD)
 ├── docs/
-│   ├── architecture.md (this file)
+│   ├── architecture.md (this file v0.2)
 │   ├── adr/
-│   │   ├── 001-stack.md
-│   │   ├── 002-langgraph.md
-│   │   ├── 003-pgvector-vs-qdrant.md
-│   │   ├── 004-3d-library.md
-│   │   └── 005-permission-model.md
+│   │   ├── 001-stack.md (Next.js 16.x, React 19, R3F 9, no hard-pin)
+│   │   ├── 002-agent-framework.md (LangGraph)
+│   │   ├── 003-pgvector-vs-qdrant.md (pgvector MVP, Qdrant future path)
+│   │   ├── 004-3d-library.md (R3F 9, Drei, hybrid orbital+layered DAG, runtime focus)
+│   │   ├── 005-permission-model.md (balanced, shell always approval, SandboxService)
+│   │   ├── 006-mcp-transport.md (stdio local + Streamable HTTP remote, SSE legacy only)
+│   │   ├── 007-sandbox-service.md (SandboxService abstraction, container isolation)
+│   │   ├── 008-model-provider.md (lightweight ModelProvider: OpenAI-compat, Anthropic, Ollama, Arena behind compat)
+│   │   ├── 009-embedding-provider.md (local-first, replaceable)
+│   │   └── 010-deployment.md (Docker Compose MVP, K8s future)
 │   ├── api-spec.md (generated)
-│   └── 3d-design.md (extract of §41)
+│   └── 3d-design.md (extract of §41, runtime focus)
 ├── apps/
-│   ├── web/ (Next.js)
+│   ├── web/ (Next.js 16.x + React 19)
 │   │   ├── app/
 │   │   │   ├── (marketing)/page.tsx
 │   │   │   ├── (dashboard)/layout.tsx
 │   │   │   │   ├── missions/page.tsx
-│   │   │   │   └── missions/[id]/page.tsx
+│   │   │   │   └── missions/[id]/page.tsx (3D runtime: agents, tasks, workflows, tool activity, approval gates)
 │   │   │   └── globals.css
 │   │   ├── components/
 │   │   │   ├── ui/ (shadcn)
-│   │   │   ├── 3d/ (Scene, AgentNode, MissionCore, WorkflowSplines, MemoryCluster, ApprovalGate, EventParticles)
+│   │   │   ├── 3d/ (Scene, AgentNode, MissionCore, WorkflowSplines, TaskNodes, ToolActivity, ApprovalGate, EventParticles) - no MemoryCluster raw DB
 │   │   │   └── mission/ (MissionCard, Timeline, AgentPanel, ApprovalModal)
 │   │   ├── lib/
 │   │   │   ├── api/ (client, types)
 │   │   │   ├── ws/ (useWebSocket)
 │   │   │   ├── store/ (zustand: mission, selection, ui)
-│   │   │   └── 3d/ (layout, state mapping, shaders)
+│   │   │   └── 3d/ (layout: hybrid orbital+layered DAG, state mapping runtime-focused)
 │   │   ├── hooks/
 │   │   ├── next.config.js
 │   │   ├── tailwind.config.js
-│   │   └── package.json
+│   │   └── package.json (pnpm)
 │   └── api/ (FastAPI)
 │       ├── app/
 │       │   ├── main.py
@@ -2701,10 +2798,10 @@ nexus-os/
 │       │   ├── routers/ (missions, tasks, agents, tools, mcp, memory, rag, approvals, ws)
 │       │   ├── models/ (SQLAlchemy)
 │       │   ├── schemas/ (Pydantic)
-│       │   ├── services/ (supervisor, agent_runner, tool_registry, permission, mcp_manager, memory, rag, approval, event_bus, evaluation)
+│       │   ├── services/ (supervisor, agent_runner, tool_registry, permission, mcp_manager [stdio+Streamable HTTP], memory, rag, approval, event_bus, evaluation, sandbox_service [NEW])
 │       │   ├── agents/ (base, supervisor, researcher, coder, analyst)
-│       │   ├── tools/ (builtin/, mcp_proxy)
-│       │   ├── core/ (model_provider, state_machine, security)
+│       │   ├── tools/ (builtin/ via SandboxService, mcp_proxy)
+│       │   ├── core/ (model_provider: ModelProvider interface + OpenAICompatProvider, AnthropicProvider, OllamaProvider + Arena behind compat, embedding_provider local-first, state_machine, security)
 │       │   └── db/ (base, session, migrations)
 │       ├── tests/
 │       ├── Dockerfile
@@ -2713,140 +2810,167 @@ nexus-os/
 │   ├── shared/ (TS types, Zod schemas, event types)
 │   └── config/ (eslint, tsconfig)
 ├── infra/
-│   ├── docker-compose.yml
-│   ├── docker-compose.prod.yml
-│   ├── Caddyfile
+│   ├── docker-compose.yml (MVP deployment target, no vendor commitment)
+│   ├── docker-compose.override.yml (local dev)
 │   └── otel-collector.yaml
 ├── scripts/
 │   ├── dev.sh
 │   ├── seed.py
 │   └── gen-openapi.sh
-├── .github/workflows/ (ci.yml, deploy.yml)
+├── .github/workflows/ (ci.yml)
 ├── .env.example
-├── README.md
-└── package.json (root workspace)
+├── README.md (note: codename NEXUS, public name TBD)
+└── package.json (root pnpm workspace)
 ```
 
-**No implementation yet — this is recommendation only.**
+**No application code yet — scaffold only after explicit approval per D10.**
 
-#### 6. Major Risks
+#### 6. Major Risks (Updated)
 
 **R1: 3D Performance & Complexity**
-- Risk: 3D becomes janky, hard to maintain, or distracts from usability
-- Mitigation: Instanced meshes, LOD, adaptive quality, mobile fallback, keep 3D state model simple, measure FPS, have 2D as primary for task management, 3D as enhanced view
+- Risk: 3D becomes janky, hard to maintain, or distracts from usability. Previous design risked rendering full vector DB as nodes.
+- Mitigation: Updated to runtime focus only (agents, tasks, workflows, tool activity, approval gates), no raw memory DB nodes. Instanced meshes, LOD, adaptive quality, mobile fallback, 2D as primary for task management, 3D as enhanced runtime view. Measure FPS.
 
 **R2: LLM Reliability & Cost**
 - Risk: Supervisor decomposition fails, agents loop, cost explodes
-- Mitigation: Pydantic validation + retry, token budgets, max steps, structured outputs, eval harness, cheap model for supervisor (gpt-4o-mini), expensive only for final tasks
+- Mitigation: Pydantic validation + retry, token budgets, max steps, structured outputs, eval harness, cheap model for supervisor, local embedding first to save cost, ModelProvider abstraction allows cost tracking per provider
 
 **R3: Security — Prompt Injection & Tool Abuse**
-- Risk: Malicious RAG doc or web page makes agent exfiltrate secrets or run destructive shell
-- Mitigation: Zero-trust design (least privilege, sandbox, secret redaction, output validation, approval gates), security test suite, audit logs
+- Risk: Malicious RAG doc or web page makes agent exfiltrate secrets or run destructive shell. Previous chroot assumption insufficient.
+- Mitigation: Zero-trust + SandboxService abstraction with container isolation for exec, no unrestricted host shell/file access, least privilege, secret redaction, output validation, approval gates (shell always approval D6), security test suite, audit logs
 
 **R4: MCP Ecosystem Immaturity**
-- Risk: MCP SDK breaking changes, servers unstable
-- Mitigation: Wrap MCP manager with abstraction, pin SDK version, have builtin tools as fallback, health checks + reconnect
+- Risk: MCP SDK breaking changes, servers unstable, transport confusion (SSE vs Streamable HTTP)
+- Mitigation: Use current spec (stdio local + Streamable HTTP remote), SSE only legacy compat note, wrap MCP manager with abstraction, pin SDK version, builtin tools fallback, health checks + reconnect
 
 **R5: LangGraph Complexity**
-- Risk: LangGraph checkpoint, interrupts hard to debug, steep learning curve
-- Mitigation: Start simple (linear DAG), add complexity gradually, thorough logging, use PostgresSaver, have escape hatch to run without checkpoint in dev
+- Risk: Checkpoint, interrupts hard to debug
+- Mitigation: Start simple linear DAG, thorough logging, PostgresSaver, escape hatch dev mode
 
 **R6: pgvector Scale**
-- Risk: pgvector slow at >1M vectors, IVFFlat recall issues
-- Mitigation: For MVP <100k vectors fine, monitor query latency, have migration path to Qdrant, use appropriate index params, hybrid search reduces reliance on pure vector
+- Risk: pgvector slow at >1M vectors
+- Mitigation: MVP <100k, local embedding first, monitor latency, migration path to Qdrant kept, hybrid search
 
 **R7: Real-time Event Ordering & Replay**
-- Risk: WS events out of order, missed events on reconnect, UI state inconsistent
-- Mitigation: Redis Streams for ordered durable log, event IDs monotonic, client stores last ID, replay on reconnect, TanStack Query refetch as fallback
+- Risk: WS events out of order, missed on reconnect
+- Mitigation: Redis Streams ordered durable log, monotonic IDs, replay, TanStack refetch fallback
 
-**R8: Scope Creep — Trying to Build Everything**
-- Risk: MVP becomes 6 months, not 6 weeks
-- Mitigation: Strict MVP definition above, cut advanced features, use candidate stack minimal, no custom workflow editor, no multi-tenant
+**R8: Scope Creep**
+- Risk: MVP becomes 6 months not planning estimate 6-8 weeks
+- Mitigation: Strict MVP cut list, planning estimate only not commitment, no custom workflow editor, no multi-tenant, no K8s, no cloud vendor commitment yet, no app code until scaffold approved
 
-#### 7. Open Decisions That Require Your Approval
+#### 7. Final Architecture Decisions (Selected Defaults D1-D10 per Review)
 
-**D1: Model Provider Abstraction**
-- Option A: Custom lightweight wrapper (200 lines) around OpenAI/Anthropic SDKs, full control, minimal dep
-- Option B: LiteLLM (supports 100+ providers, but heavy, extra dep)
-- **Recommendation:** A for MVP, B later if need many providers
-- **Need approval:** Which to start?
+**D1: Model Provider Abstraction — SELECTED: Custom lightweight interface**
+- Decision: Custom lightweight ModelProvider interface, not heavy LiteLLM
+- Structure:
+  ```
+  ModelProvider (interface: chat, stream_chat, cost tracking)
+   ├── OpenAICompatibleProvider (covers OpenAI, Groq, Arena/OpenAI-compatible, etc.)
+   ├── AnthropicProvider
+   └── OllamaProvider
+  ```
+- Arena/OpenAI-compatible access fits behind OpenAICompatibleProvider
+- Rationale: Full control, minimal dep, easy to swap, cost tracking, ~200 lines
 
-**D2: Embedding Model**
-- Option A: OpenAI `text-embedding-3-small` (1536 dim, cheap, good quality, requires API key, cost)
-- Option B: Local `bge-small-en-v1.5` (384 dim, free, runs on CPU, lower quality, needs ONNX)
-- Option C: Both, configurable
-- **Recommendation:** A for MVP (simpler), C for future (allow local for privacy)
-- **Need approval:** Preference?
+**D2: Embedding Model — SELECTED: Local embedding provider first, replaceable later**
+- Decision: Local-first (e.g., bge-small-en-v1.5 384 dim or nomic-embed-text via Ollama), runs locally, free, privacy-preserving, replaceable via config with OpenAI-compatible later
+- Interface: EmbeddingProvider.embed(texts) -> vectors
+- Rationale: Cost saving, no API key needed for MVP, easy to replace later via config, avoids hard-pinning to OpenAI
 
-**D3: Frontend Package Manager**
-- Option A: pnpm (fast, strict, good for monorepo)
-- Option B: npm (simpler, no extra install)
-- **Recommendation:** pnpm
-- **Need approval:** Okay?
+**D3: Frontend Package Manager — SELECTED: pnpm**
+- Decision: pnpm for monorepo, fast, strict, good workspace support
+- Rationale: Speed, disk efficiency, strict deps, standard for monorepos
 
-**D4: Auth for MVP**
-- Option A: Single dev token (Bearer), stored in .env, no login UI (fastest)
-- Option B: Simple email/password + JWT, login page (adds 1-2 days)
-- **Recommendation:** A for MVP, B immediately after
-- **Need approval:** Which?
+**D4: Auth for MVP — SELECTED: Single development Bearer token**
+- Decision: Single dev Bearer token stored in .env, no login UI for MVP, httpOnly cookie + header, WS token via query
+- Rationale: Fastest to ship, sufficient for MVP, future path to JWT/orgs/RBAC/SSO
 
-**D5: 3D Default View**
-- Option A: Orbital (agents orbit around core) — more dynamic, feels alive
-- Option B: Layered DAG (left to right, tasks in layers) — more readable for dependencies
-- Option C: Hybrid — orbital for agents, layered for tasks (as described in doc)
-- **Recommendation:** C (hybrid) — best of both
-- **Need approval:** Preference?
+**D5: 3D Default View — SELECTED: Hybrid orbital agents + layered task DAG**
+- Decision: Hybrid — orbital for agents (inner orbit radius 3, dynamic), layered DAG for tasks/workflows (middle orbit radius 6 + layer depth), focus on runtime state
+- 3D focuses on: agents, active tasks, workflows, tool activity, approval gates
+- Explicitly NOT: full memory/vector DB as raw 3D nodes
+- Rationale: Best of both — dynamic feel + readable dependencies, runtime legibility
 
-**D6: Tool Approval Policy Default**
-- Option A: Strict — all write/shell require approval (safer, more interruptions)
-- Option B: Balanced — write to `/workspace/output` auto, elsewhere approval, shell always approval (recommended)
-- Option C: Permissive — all auto except shell (faster, less safe)
-- **Recommendation:** B
-- **Need approval:** Policy?
+**D6: Tool Approval Policy Default — SELECTED: Balanced approval policy; shell always approval**
+- Decision: Balanced — write to allowed workspace (via SandboxService) auto if low risk, elsewhere approval, shell always approval, high-risk tools approval_required
+- Policy: `tool_permissions` table with arg pattern regex, risk_level mapping, mission override
+- Rationale: Safety + usability balance, prevents destructive shell, still allows fast iteration
 
-**D7: Deployment Target for MVP Demo**
-- Option A: Fly.io (easy Docker, scale to zero, cheap)
-- Option B: Single Hetzner VM with Docker Compose + Caddy (cheapest, more control)
-- Option C: Vercel (frontend) + Render (backend) + Neon (Postgres) + Upstash (Redis) (managed, more expensive)
-- **Recommendation:** A or B for cost
-- **Need approval:** Which?
+**D7: Deployment Target for MVP — SELECTED: Docker Compose first**
+- Decision: MVP deployment target is Docker Compose only, no commitment to Fly.io, Hetzner, Vercel/Render, etc. yet. Kubernetes remains future option.
+- Rationale: Simplest, no vendor lock-in, runs anywhere, cost-effective, matches review feedback
 
-**D8: Branding Final Name**
-- Keep NexusOS or alternative? Options: NEXUS, OrbitOS, MissionOS, AgentDeck
-- **Recommendation:** Keep NexusOS, brand as "NEXUS" short
-- **Need approval:** Name lock?
+**D8: Branding Final Name — SELECTED: NEXUS is temporary codename**
+- Decision: Keep NEXUS / NexusOS as internal repository/project codename only, NOT final unique public brand. Public product name will be finalized later because multiple existing projects already use NexusOS.
+- Rationale: Avoid trademark/confusion, allows future rebrand, per review feedback
 
-**D9: License**
-- Option A: MIT (open, permissive)
-- Option B: AGPL (open but copyleft, prevents closed hosting)
-- Option C: Proprietary (closed for now)
-- **Need approval:** License choice?
+**D9: License — SELECTED: MIT**
+- Decision: MIT license, open, permissive
+- Rationale: Open source, permissive, encourages adoption, per review
 
-**D10: Next Step After Approval**
-- After you approve architecture, should we:
-  1. Scaffold repository structure (empty apps with package.json, Docker Compose, etc.) but no logic?
-  2. Or start implementing MVP backend (FastAPI + Postgres + Redis + Supervisor)?
-  3. Or start with frontend 3D prototype?
-- **Recommendation:** Scaffold repo + Docker Compose + CI + basic FastAPI health + Next.js shell with 3D canvas mock (no agents yet), then iterate
-- **Need approval:** Desired next phase?
+**D10: Next Step After Approval — SELECTED: Scaffold repository first**
+- Decision: After architecture approval, scaffold repository structure only (empty apps with package.json, Docker Compose, CI, configs, no logic), then iterate. Do NOT implement application code yet, do NOT install dependencies, do NOT create application source files until explicit scaffold approval.
+- Steps after approval: Create pnpm workspace, apps/web (Next.js 16.x shell with 3D canvas mock runtime-focused), apps/api (FastAPI health), packages/shared, infra/docker-compose.yml (MVP), .env.example, README with codename note, CI workflow, ADRs
+- Rationale: Clean foundation, validates tooling, no logic yet, per review IMPORTANT
+
+**All D1-D10 now recorded as final decisions, not open questions.**
 
 ---
 
-## Appendix: Glossary
+## Appendix: Glossary (Updated v0.2)
 
 - **Mission:** Top-level user goal, decomposed to tasks
 - **Task:** Unit of work assigned to one agent type
 - **Agent Run:** Execution instance of an agent for a task
 - **Tool:** Function callable by agent, builtin or MCP
-- **MCP:** Model Context Protocol, standard for tool servers
-- **Approval Gate:** Human-in-loop checkpoint for risky tool
-- **Memory Entry:** Fact/artifact stored in Postgres + vector
-- **RAG:** Retrieval Augmented Generation
+- **MCP:** Model Context Protocol, standard for tool servers (stdio local + Streamable HTTP remote, SSE legacy only)
+- **Approval Gate:** Human-in-loop checkpoint for risky tool (balanced policy, shell always approval)
+- **Memory Entry:** Fact/artifact stored in Postgres + vector (not rendered as raw 3D nodes, runtime focus only)
+- **RAG:** Retrieval Augmented Generation (local embedding first, replaceable)
 - **Event:** Real-time occurrence emitted to Redis and WS
-- **DAG:** Directed Acyclic Graph of task dependencies
+- **DAG:** Directed Acyclic Graph of task dependencies (layered part of hybrid 3D design)
+- **SandboxService:** Abstraction for all file/shell access, container isolation for exec, no unrestricted host access
+- **ModelProvider:** Lightweight abstraction: OpenAI-compatible (incl. Arena), Anthropic, Ollama
+- **EmbeddingProvider:** Local-first embedding interface, replaceable
+- **NEXUS Codename:** Internal repository/project codename only, public name TBD due to existing NexusOS projects
 
 ---
 
-**End of Architecture Document v0.1**
+## Appendix: ADR Index (To Be Created on Scaffold)
 
-**Next Action:** Await your approval on §45.7 Open Decisions. Do NOT implement until approved.
+Per D10 scaffold, ADRs will be created in `docs/adr/`:
+
+- 001-stack.md: Next.js 16.x, React 19, R3F 9, no hard-pin, pnpm, MIT, Docker Compose MVP
+- 002-agent-framework.md: LangGraph for DAG + checkpoint + interrupt
+- 003-pgvector-vs-qdrant.md: pgvector MVP, Qdrant future path
+- 004-3d-library.md: R3F 9 + Drei, hybrid orbital+layered DAG (D5), runtime focus (agents, tasks, workflows, tool activity, approval gates), no raw vector DB nodes
+- 005-permission-model.md: Balanced policy, shell always approval (D6), 3 levels, SandboxService
+- 006-mcp-transport.md: stdio local + Streamable HTTP remote, SSE legacy only
+- 007-sandbox-service.md: SandboxService abstraction, container isolation, no unrestricted host access
+- 008-model-provider.md: Lightweight ModelProvider (OpenAI-compat incl. Arena, Anthropic, Ollama) D1
+- 009-embedding-provider.md: Local-first, replaceable D2
+- 010-deployment.md: Docker Compose first (D7), K8s future, no vendor commitment
+- 011-naming.md: NEXUS temporary codename (D8), public name TBD
+- 012-auth.md: Single dev Bearer token (D4)
+
+---
+
+**End of Architecture Document v0.2**
+
+**Status:** Review feedback corrections applied. All D1-D10 recorded as selected defaults. No application code implemented. No dependencies installed. Awaiting explicit approval before scaffolding repository per D10.
+
+**What Changed v0.1 -> v0.2:**
+- Frontend target updated to Next.js 16.x, React 19, R3F 9, no hard-pinned patch versions
+- MCP transport updated to stdio + Streamable HTTP, SSE only legacy compat
+- Deployment MVP clarified as Docker Compose only, no cloud vendor commitment, K8s future option
+- SandboxService abstraction introduced, container isolation for exec, no unrestricted host access
+- 3D focus narrowed to mission runtime state (agents, active tasks, workflows, tool activity, approval gates), no raw memory/vector DB nodes
+- ModelProvider lightweight abstraction defined (OpenAI-compatible incl. Arena, Anthropic, Ollama)
+- Naming clarified as temporary codename, public name TBD
+- MVP estimate clarified as planning estimate only
+- D1-D10 decisions recorded as final selections
+
+**Final Decisions:** D1 custom lightweight ModelProvider, D2 local embedding first replaceable, D3 pnpm, D4 single Bearer token, D5 hybrid orbital+layered DAG, D6 balanced approval shell always approval, D7 Docker Compose first, D8 NEXUS temporary codename, D9 MIT, D10 scaffold first.
+
+**Next Action:** Await explicit approval before scaffolding. Do NOT implement application code yet.
