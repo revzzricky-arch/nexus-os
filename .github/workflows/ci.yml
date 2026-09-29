@@ -95,7 +95,11 @@ jobs:
           # Allow exec_command method name but not raw exec(
           ! grep -rn "^\s*exec(" --include="*.py" app/ || (echo "Found raw exec(" && exit 1)
           ! grep -rn "^\s*eval(" --include="*.py" app/ || (echo "Found eval(" && exit 1)
-          ! grep -rn "compile(" --include="*.py" app/ | grep -v "test" || (echo "Found compile(" && exit 1)
+          # Prevent Python builtin compile() abuse for code execution, but allow LangGraph's graph.compile() and re.compile() which are safe method calls
+          # False positive in Phase 2B-3: app/core/langgraph/graph.py uses graph.compile() which is LangGraph StateGraph API, not builtin compile()
+          # Narrow fix: exclude .compile( method calls (contains dot), exclude test files, Compiled word, and compile_command
+          # Still catches dangerous builtin compile( without dot (e.g., compile(\"code\", ...))
+          ! grep -rn "compile(" --include="*.py" app/ | grep -v "test" | grep -v "\.compile(" | grep -v "Compiled" | grep -v "compile_command" || (echo "Found dangerous builtin compile(" && exit 1)
           echo "Security scan passed - no hardcoded secrets, no eval/exec abuse"
 
   docker:

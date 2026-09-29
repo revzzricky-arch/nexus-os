@@ -1,6 +1,5 @@
 """
-Missions Router - Phase 2B-2 Mission API + EventBus Foundation
-
+Missions Router - Phase 2B-2 Mission API + EventBus Foundation + Phase 2B-3 Supervisor + LangGraph
 Implements:
 POST /api/v1/missions - create mission
 GET /api/v1/missions - list with pagination + status filter deterministic
@@ -9,6 +8,7 @@ PATCH /api/v1/missions/{id} - allow explicitly supported fields validate transit
 POST /api/v1/missions/{id}/cancel - idempotent cancel
 GET /api/v1/missions/{id}/tasks - list tasks for mission no cross-mission leak
 GET /api/v1/missions/{id}/events - ordered deterministic filters type/from/to/limit/offset/last_event_id mandatory scoping
+POST /api/v1/missions/{id}/start - Phase 2B-3 start orchestration via Supervisor/LangGraph
 
 Error model: {"error": {"code": "...", "message": "...", "details": {}}}
 Bearer Auth D4 reused
@@ -28,6 +28,7 @@ from app.schemas.event import EventResponse
 from app.schemas.common import PaginatedResponse, ErrorResponse
 from app.services.mission import mission_service
 from app.services.event_bus import event_bus_service
+from app.services.orchestrator import orchestrator_service
 from app.core.exceptions import DomainError
 from app.models.mission import Mission
 from app.models.task import Task
@@ -144,6 +145,36 @@ async def cancel_mission(
         return mission
     except DomainError as e:
         _handle_domain_error(e)
+
+
+@router.post("/{mission_id}/start", response_model=dict)
+async def start_mission(
+    mission_id: uuid.UUID = Path(..., description="Mission ID"),
+    db: AsyncSession = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """
+    Phase 2B-3: Start mission orchestration via Supervisor + LangGraph
+    - verify mission exists
+    - verify valid starting state (draft, planned, failed, paused)
+    - invoke Supervisor/LangGraph orchestration
+    - transition mission through proper lifecycle draft→decomposing→planned→running→completed/failed
+    - return mission execution info
+
+    MVP execution mechanism: synchronous within request for now, but isolated behind orchestrator service boundary
+    so it can be replaced by durable worker/queue later (documented in ADR 015).
+    Does NOT run long-lived orchestration that would block indefinitely - each node is quick and deterministic.
+    """
+    try:
+        result = await orchestrator_service.start_mission(db, mission_id)
+        return result
+    except DomainError as e:
+        _handle_domain_error(e)
+    except Exception as ex:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "validation_error", "message": str(ex)[:500], "details": {}}},
+        )
 
 
 @router.get("/{mission_id}/tasks", response_model=PaginatedResponse[TaskResponse])

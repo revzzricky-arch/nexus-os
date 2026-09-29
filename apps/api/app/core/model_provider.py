@@ -144,11 +144,46 @@ class OllamaProvider(ModelProvider):
         return self.provider_name
 
 
+class DeterministicProvider(ModelProvider):
+    """Deterministic provider for tests/dev - no API key required, returns valid structured output"""
+
+    def __init__(self):
+        self.provider_name = "deterministic"
+
+    async def chat(self, messages, model, temperature=0.7, max_tokens=None, tools=None) -> ChatResponse:
+        import json
+
+        plan = {
+            "tasks": [
+                {"id": "task_1", "title": "Research Task", "description": "Research goal", "agent_type": "researcher", "dependencies": []},
+                {"id": "task_2", "title": "Analysis Task", "description": "Analyze findings", "agent_type": "analyst", "dependencies": ["task_1"]},
+                {"id": "task_3", "title": "Finalize", "description": "Finalize results", "agent_type": "supervisor", "dependencies": ["task_2"]},
+            ]
+        }
+
+        return ChatResponse(
+            id="deterministic",
+            model=model,
+            provider=self.provider_name,
+            content=json.dumps(plan),
+            usage={"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+            cost_cents=0,
+            finish_reason="stop",
+        )
+
+    async def stream_chat(self, messages, model, temperature=0.7, max_tokens=None, tools=None):
+        yield '{"tasks": []}'
+        return
+
+    def get_provider_name(self) -> str:
+        return self.provider_name
+
+
 # Factory - scaffold
 def get_model_provider(provider_name: str = "openai-compatible") -> ModelProvider:
     """
     Factory for ModelProvider - scaffold
-    provider_name: openai-compatible, anthropic, ollama
+    provider_name: openai-compatible, anthropic, ollama, deterministic
     For Arena/OpenAI-compatible: use openai-compatible with base_url override via env
     """
     from app.config import settings
@@ -162,6 +197,8 @@ def get_model_provider(provider_name: str = "openai-compatible") -> ModelProvide
         return AnthropicProvider(api_key=settings.anthropic_api_key)
     elif provider_name == "ollama":
         return OllamaProvider(base_url=settings.ollama_base_url)
+    elif provider_name == "deterministic":
+        return DeterministicProvider()
     else:
         # Default to openai-compatible
         return OpenAICompatibleProvider()
