@@ -5,7 +5,7 @@ Fix: agent_id -> agents.id, agent_run_id nullable -> agent_runs.id
 """
 
 from typing import Optional, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 import uuid
 from enum import Enum
@@ -63,10 +63,12 @@ class EventResponse(BaseModel):
     timestamp: datetime
     version: int = 1
     payload: Any
-    metadata: Optional[Any] = None
+    metadata: Optional[Any] = Field(default=None, validation_alias="metadata_")
 
-    class Config:
-        from_attributes = True
+    model_config = {
+        "from_attributes": True,
+        "populate_by_name": True,
+    }
 
 
 class EventEnvelope(BaseModel):

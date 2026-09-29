@@ -3,15 +3,17 @@ NEXUS (Codename) - FastAPI Application Entry Point
 Scaffold Phase - Minimal API with health/version, placeholder routers
 """
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from app.config import settings
 from app.routers import health, missions, tasks, agents, tools, mcp, memory, rag, approvals, ws
+from app.core.exceptions import DomainError
 
 # Create FastAPI app
 app = FastAPI(
     title="NEXUS API (Codename)",
-    description="3D Agent Operating System / AI Agent Command Center - Scaffold Phase. Temporary codename NEXUS, public name TBD.",
+    description="3D Agent Operating System / AI Agent Command Center - Phase 2B-2 Mission API + EventBus Foundation. Temporary codename NEXUS, public name TBD.",
     version=settings.version,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -26,6 +28,30 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(DomainError)
+async def domain_error_handler(request: Request, exc: DomainError):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": {"code": exc.code, "message": exc.message, "details": exc.details}},
+    )
+
+
+from fastapi import HTTPException
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    # If detail already has error structure, return it directly
+    if isinstance(exc.detail, dict) and "error" in exc.detail:
+        return JSONResponse(status_code=exc.status_code, content=exc.detail)
+    # Otherwise wrap in error format
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": {"code": "http_error", "message": str(exc.detail), "details": {}}},
+    )
+
 
 # Include routers - health/version at root, others under /api/v1
 app.include_router(health.router, tags=["system"])
