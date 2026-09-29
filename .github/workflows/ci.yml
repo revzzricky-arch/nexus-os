@@ -85,46 +85,8 @@ jobs:
 
       - name: Run full backend test suite
         run: |
-          set -o pipefail
-          pytest -v --tb=long -vv -W ignore 2>&1 | tee /tmp/pytest_output.txt
+          pytest -v -W ignore --tb=short
           echo "Full backend pytest suite passed"
-          cat /tmp/pytest_output.txt
-
-      - name: Upload pytest output on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pytest-output
-          path: /tmp/pytest_output.txt
-
-      - name: Show pytest failures in log summary
-        if: failure()
-        run: |
-          echo "### Pytest Failures" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          tail -n 300 /tmp/pytest_output.txt >> $GITHUB_STEP_SUMMARY || true
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          cat /tmp/pytest_output.txt | grep -E "FAILED|ERROR|test_" | tail -n 100 || true
-          echo "--- tail 500 ---"
-          tail -n 500 /tmp/pytest_output.txt || true
-
-      - name: Comment PR with pytest failures
-        if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "Attempting to comment PR with failures"
-          # Find PR number for this branch
-          PR_NUM=$(gh pr list --head feat/phase3-durable-worker --json number --jq '.[0].number' || echo "8")
-          echo "PR_NUM=$PR_NUM"
-          # Prepare truncated output
-          tail -n 200 /tmp/pytest_output.txt > /tmp/fail_tail.txt
-          echo "## Backend pytest failure (tail)" > /tmp/comment.txt
-          echo '```' >> /tmp/comment.txt
-          cat /tmp/fail_tail.txt >> /tmp/comment.txt
-          echo '```' >> /tmp/comment.txt
-          gh pr comment $PR_NUM --body-file /tmp/comment.txt || echo "Failed to comment PR"
-          cat /tmp/comment.txt
 
       - name: Security scan - no hardcoded secrets, no eval/exec abuse
         run: |
