@@ -151,9 +151,9 @@ async def cancel_mission(
         # Validate via MissionService (do not bypass)
         mission = await mission_service.cancel_mission(db, mission_id)
 
-        # Integrate job cancellation - side effect, preserve MissionResponse for backward compat
+        # Integrate job cancellation with ownership enforcement
         try:
-            await job_service.cancel_jobs_for_mission(db, mission_id)
+            await job_service.cancel_jobs_for_mission(db, mission_id, user_context=user)
         except Exception:
             pass
 
@@ -216,6 +216,7 @@ async def start_mission(
             mission_id=mission_id,
             idempotency_key=idempotency_key,
             payload={"triggered_by": "api", "user": user.get("sub") if isinstance(user, dict) else None},
+            user_context=user,
         )
 
         return {

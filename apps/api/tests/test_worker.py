@@ -1,6 +1,7 @@
 """
-Worker Tests - Phase 3 PR 3.1
+Worker Tests - Phase 3 PR 3.1 with heartbeat isolation fix
 - pending execution success failure retry heartbeat cancellation expired lease recovery
+- New: heartbeat independent session, long-running does NOT become stale, ownership mismatch rejection
 """
 
 import uuid
@@ -33,10 +34,11 @@ async def session_factory(engine):
     await engine.dispose()
 
 
-async def create_mission(factory, title="Worker Test Mission", status="draft"):
+async def create_mission(factory, title="Worker Test Mission", status="draft", user_id=None):
     async with factory() as session:
         m = Mission(
             id=uuid.uuid4(),
+            user_id=user_id,
             title=title,
             goal="Test goal for worker",
             template="general",
@@ -57,11 +59,10 @@ async def test_worker_pending_execution_success(session_factory):
         await session.commit()
         job_id = job.id
 
-    # Mock orchestrator to succeed
     with patch("app.services.orchestrator.orchestrator_service.start_mission", new_callable=AsyncMock) as mock_start:
         mock_start.return_value = {"mission_id": str(mission.id), "status": "completed"}
 
-        worker = MissionWorker(worker_id="test-worker-1", poll_interval=0.1)
+        worker = MissionWorker(worker_id="test-worker-1", poll_interval=0.1, session_factory=session_factory)
 
         async with session_factory() as session:
             claimed = await job_service.claim_job(session, worker_id=worker.worker_id)
@@ -73,7 +74,6 @@ async def test_worker_pending_execution_success(session_factory):
 
             assert result is True
 
-        # Verify job completed
         async with session_factory() as session:
             job = await job_service.get_job(session, job_id)
             assert job.status == "completed"
@@ -92,7 +92,7 @@ async def test_worker_pending_execution_failure(session_factory):
     with patch("app.services.orchestrator.orchestrator_service.start_mission", new_callable=AsyncMock) as mock_start:
         mock_start.side_effect = Exception("orchestrator failed")
 
-        worker = MissionWorker(worker_id="test-worker-fail", poll_interval=0.1)
+        worker = MissionWorker(worker_id="test-worker-fail", poll_interval=0.1, session_factory=session_factory)
 
         async with session_factory() as session:
             claimed = await job_service.claim_job(session, worker_id=worker.worker_id)
@@ -101,7 +101,6 @@ async def test_worker_pending_execution_failure(session_factory):
             result = await worker.execute_job(session, claimed.id)
             await session.commit()
 
-            # First failure should go back to pending for retry (attempts 1 < max 3)
             assert result is False
 
         async with session_factory() as session:
@@ -124,19 +123,16 @@ async def test_worker_retry_bounded(session_factory):
     with patch("app.services.orchestrator.orchestrator_service.start_mission", new_callable=AsyncMock) as mock_start:
         mock_start.side_effect = Exception("always fail")
 
-        worker = MissionWorker(worker_id="test-worker-retry")
+        worker = MissionWorker(worker_id="test-worker-retry", session_factory=session_factory)
 
-        # First attempt
         async with session_factory() as session:
             claimed = await job_service.claim_job(session, worker_id=worker.worker_id)
             await session.commit()
             await worker.execute_job(session, claimed.id)
             await session.commit()
 
-        # Second attempt - should be last, then fail
         async with session_factory() as session:
             claimed2 = await job_service.claim_job(session, worker_id=worker.worker_id)
-            # If first failure returned to pending, we can claim again
             if claimed2:
                 await session.commit()
                 await worker.execute_job(session, claimed2.id)
@@ -144,11 +140,8 @@ async def test_worker_retry_bounded(session_factory):
 
         async with session_factory() as session:
             job = await job_service.get_job(session, job_id)
-            # After max retries exceeded, should be failed
-            # Depending on flow: first fail -> pending, second claim -> fail -> failed
             assert job.status in ["pending", "failed"]
             if job.status == "pending":
-                # Claim again to trigger final failure
                 claimed3 = await job_service.claim_job(session, worker_id=worker.worker_id)
                 await session.commit()
                 if claimed3:
@@ -159,7 +152,7 @@ async def test_worker_retry_bounded(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_worker_heartbeat(session_factory):
+async def test_worker_heartbeat_independent_session(session_factory):
     mission = await create_mission(session_factory)
 
     async with session_factory() as session:
@@ -168,19 +161,17 @@ async def test_worker_heartbeat(session_factory):
         job_id = job.id
 
     with patch("app.services.orchestrator.orchestrator_service.start_mission", new_callable=AsyncMock) as mock_start:
-        # Simulate long running task that would need heartbeat
         async def long_task(*args, **kwargs):
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.35)
             return {"status": "completed"}
 
         mock_start.side_effect = long_task
 
-        worker = MissionWorker(worker_id="test-worker-hb", poll_interval=0.1, heartbeat_interval=0.05)
+        worker = MissionWorker(worker_id="test-worker-hb", poll_interval=0.1, heartbeat_interval=0.05, session_factory=session_factory)
 
         async with session_factory() as session:
             claimed = await job_service.claim_job(session, worker_id=worker.worker_id)
             await session.commit()
-            first_hb = claimed.heartbeat_at
 
             await worker.execute_job(session, claimed.id)
             await session.commit()
@@ -188,6 +179,88 @@ async def test_worker_heartbeat(session_factory):
         async with session_factory() as session:
             job = await job_service.get_job(session, job_id)
             assert job.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_worker_long_running_not_stale(session_factory):
+    mission = await create_mission(session_factory)
+
+    async with session_factory() as session:
+        job = await job_service.create_job(session, mission_id=mission.id)
+        await session.commit()
+        job_id = job.id
+
+    async with session_factory() as session:
+        claimed = await job_service.claim_job(session, worker_id="test-worker-long", lease_timeout=1)
+        await session.commit()
+        assert claimed is not None
+
+    async def heartbeat_simulation():
+        for _ in range(6):
+            await asyncio.sleep(0.1)
+            async with session_factory() as hb_sess:
+                await job_service.heartbeat_job(hb_sess, job_id, "test-worker-long")
+                await hb_sess.commit()
+
+    hb_task = asyncio.create_task(heartbeat_simulation())
+
+    await asyncio.sleep(0.35)
+    async with session_factory() as check_session:
+        recovered = await job_service.recover_stale_jobs(check_session, lease_timeout=1)
+        await check_session.commit()
+        assert len(recovered) == 0, "Healthy long-running worker with independent heartbeat commits should NOT be reclaimed"
+
+    await hb_task
+
+    await asyncio.sleep(1.2)
+    async with session_factory() as check_session:
+        recovered2 = await job_service.recover_stale_jobs(check_session, lease_timeout=1)
+        await check_session.commit()
+        assert len(recovered2) == 1
+        assert "test-worker-long" in recovered2[0].error
+
+
+@pytest.mark.asyncio
+async def test_worker_heartbeat_committed_independently(session_factory):
+    mission = await create_mission(session_factory)
+
+    async with session_factory() as session:
+        job = await job_service.create_job(session, mission_id=mission.id)
+        await session.commit()
+        job_id = job.id
+
+    async with session_factory() as session:
+        claimed = await job_service.claim_job(session, worker_id="worker-hb-commit")
+        await session.commit()
+        initial_hb = claimed.heartbeat_at
+
+    await asyncio.sleep(0.05)
+    async with session_factory() as hb_session:
+        hb_job = await job_service.heartbeat_job(hb_session, job_id, "worker-hb-commit")
+        await hb_session.commit()
+        assert hb_job.heartbeat_at > initial_hb
+
+    async with session_factory() as session:
+        job = await job_service.get_job(session, job_id)
+        assert job.heartbeat_at > initial_hb
+
+
+@pytest.mark.asyncio
+async def test_worker_ownership_mismatch_heartbeat_rejection(session_factory):
+    mission = await create_mission(session_factory)
+
+    async with session_factory() as session:
+        job = await job_service.create_job(session, mission_id=mission.id)
+        await session.commit()
+        job_id = job.id
+
+    async with session_factory() as session:
+        claimed = await job_service.claim_job(session, worker_id="owner-worker")
+        await session.commit()
+
+    async with session_factory() as session:
+        with pytest.raises(Exception):
+            await job_service.heartbeat_job(session, job_id, "other-worker")
 
 
 @pytest.mark.asyncio
@@ -199,26 +272,22 @@ async def test_worker_cancellation(session_factory):
         await session.commit()
         job_id = job.id
 
-    # Claim job
     async with session_factory() as session:
         claimed = await job_service.claim_job(session, worker_id="worker-cancel-test")
         await session.commit()
         assert claimed.status == "running"
 
-    # Cancel job while running - worker should observe stop safely
     async with session_factory() as session:
         cancelled = await job_service.cancel_job(session, job_id)
         await session.commit()
         assert cancelled.status == "cancelled"
 
-    # Worker tries to execute cancelled job - should skip
     with patch("app.services.orchestrator.orchestrator_service.start_mission", new_callable=AsyncMock) as mock_start:
         mock_start.return_value = {"status": "completed"}
 
-        worker = MissionWorker(worker_id="worker-cancel-test")
+        worker = MissionWorker(worker_id="worker-cancel-test", session_factory=session_factory)
 
         async with session_factory() as session:
-            # Even if we call execute_job on cancelled, it should return True and not call orchestrator
             result = await worker.execute_job(session, job_id)
             await session.commit()
             assert result is True
@@ -242,30 +311,27 @@ async def test_worker_expired_lease_recovery(session_factory):
         j1_id = c1.id
         j2_id = c2.id
 
-    # Make j1 stale (crashed worker)
     async with session_factory() as session:
         job = await session.get(MissionJob, j1_id)
         job.heartbeat_at = datetime.now(timezone.utc) - timedelta(seconds=LEASE_TIMEOUT_SECONDS + 10)
         job.locked_at = datetime.now(timezone.utc) - timedelta(seconds=LEASE_TIMEOUT_SECONDS + 10)
         await session.commit()
 
-    # j2 healthy
     async with session_factory() as session:
         job = await session.get(MissionJob, j2_id)
         job.heartbeat_at = datetime.now(timezone.utc)
         job.locked_at = datetime.now(timezone.utc)
         await session.commit()
 
-    # New worker recovers stale
     async with session_factory() as session:
         recovered = await job_service.recover_stale_jobs(session, lease_timeout=LEASE_TIMEOUT_SECONDS)
         await session.commit()
 
         assert len(recovered) == 1
         assert recovered[0].id == j1_id
+        assert "old-worker-1" in recovered[0].error
 
-        # New worker can claim recovered job
-        new_worker = MissionWorker(worker_id="new-worker")
+        new_worker = MissionWorker(worker_id="new-worker", session_factory=session_factory)
         claimed = await job_service.claim_job(session, worker_id=new_worker.worker_id)
         await session.commit()
 
@@ -284,15 +350,39 @@ async def test_worker_run_once(session_factory):
     with patch("app.services.orchestrator.orchestrator_service.start_mission", new_callable=AsyncMock) as mock_start:
         mock_start.return_value = {"status": "completed"}
 
-        worker = MissionWorker(worker_id="test-worker-once")
+        worker = MissionWorker(worker_id="test-worker-once", session_factory=session_factory)
 
         async with session_factory() as session:
             job_id = await worker.run_once(session)
             await session.commit()
             assert job_id is not None
 
-        # No more jobs
         async with session_factory() as session:
             job_id2 = await worker.run_once(session)
             await session.commit()
             assert job_id2 is None
+
+
+@pytest.mark.asyncio
+async def test_recovery_preserves_locked_by(session_factory):
+    mission = await create_mission(session_factory)
+
+    async with session_factory() as session:
+        job = await job_service.create_job(session, mission_id=mission.id)
+        await session.commit()
+
+        claimed = await job_service.claim_job(session, worker_id="preserved-worker-123")
+        await session.commit()
+        job_id = claimed.id
+
+    async with session_factory() as session:
+        job = await session.get(MissionJob, job_id)
+        job.heartbeat_at = datetime.now(timezone.utc) - timedelta(seconds=LEASE_TIMEOUT_SECONDS + 10)
+        job.locked_at = datetime.now(timezone.utc) - timedelta(seconds=LEASE_TIMEOUT_SECONDS + 10)
+        await session.commit()
+
+    async with session_factory() as session:
+        recovered = await job_service.recover_stale_jobs(session, lease_timeout=LEASE_TIMEOUT_SECONDS)
+        await session.commit()
+        assert len(recovered) == 1
+        assert "preserved-worker-123" in recovered[0].error

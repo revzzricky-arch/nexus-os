@@ -44,7 +44,7 @@ def client():
                 await session.close()
 
     async def override_get_current_user():
-        return {"user_id": "test-user", "token_valid": True}
+        return {"user_id": "dev-user", "token_valid": True}
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_current_user] = override_get_current_user

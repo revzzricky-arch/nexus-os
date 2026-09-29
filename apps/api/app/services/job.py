@@ -1,5 +1,9 @@
 """
 JobService - Phase 3 PR 3.1 Durable Worker + Mission Job System
+Fixes:
+- Heartbeat transaction isolation handled in worker (separate session)
+- Ownership enforcement (Phase 2B-4 boundary)
+- Recovery log preserves locked_by
 
 Implements:
 - create_job
@@ -16,7 +20,7 @@ Security:
 - No secrets in payload
 - No bearer token in payload/logs
 - Validate payload size
-- Mission/user scoping
+- Mission/user scoping with ownership enforcement
 - No arbitrary execution
 - No eval/exec/compile/shell
 """
@@ -30,15 +34,15 @@ from sqlalchemy import select, and_, or_, text, func
 from sqlalchemy.exc import IntegrityError
 
 from app.models.job import MissionJob, JOB_STATUSES, ACTIVE_JOB_STATUSES
-from app.core.exceptions import ValidationError, NotFoundError, ConflictError
+from app.models.mission import Mission
+from app.core.exceptions import ValidationError, NotFoundError, ConflictError, PermissionDeniedError
 from app.config import settings
 
 # Limits
 MAX_PAYLOAD_SIZE_BYTES = 32 * 1024  # 32KB
-LEASE_TIMEOUT_SECONDS = 60  # Configurable lease timeout, heartbeat must be renewed within this
+LEASE_TIMEOUT_SECONDS = 60
 HEARTBEAT_INTERVAL_SECONDS = 20
 
-# Forbidden keys that must not appear in payload (secrets, tokens)
 FORBIDDEN_PAYLOAD_KEYS = {
     "token",
     "bearer_token",
@@ -61,8 +65,6 @@ FORBIDDEN_PAYLOAD_SUBSTRINGS = [
 def _validate_payload(payload: Optional[Dict[str, Any]]) -> None:
     if payload is None:
         return
-
-    # Size check
     try:
         payload_str = json.dumps(payload)
         if len(payload_str.encode("utf-8")) > MAX_PAYLOAD_SIZE_BYTES:
@@ -70,13 +72,11 @@ def _validate_payload(payload: Optional[Dict[str, Any]]) -> None:
     except (TypeError, ValueError) as e:
         raise ValidationError(f"Invalid payload JSON: {e}")
 
-    # Forbidden keys check - no secrets in payload
     payload_lower_keys = {k.lower() for k in payload.keys()} if isinstance(payload, dict) else set()
     for forbidden in FORBIDDEN_PAYLOAD_KEYS:
         if forbidden in payload_lower_keys:
             raise ValidationError(f"Forbidden key in payload: {forbidden} - no secrets/tokens allowed")
 
-    # Forbidden substrings in values - no secrets/Bearer
     payload_str_lower = json.dumps(payload).lower()
     if "bearer " in payload_str_lower:
         raise ValidationError("Payload contains Bearer token - not allowed")
@@ -88,8 +88,82 @@ def _validate_payload(payload: Optional[Dict[str, Any]]) -> None:
 
 class JobService:
     """
-    Durable job service with Postgres row locking
+    Durable job service with Postgres row locking and ownership enforcement
     """
+
+    def _get_user_id_from_context(self, user_context: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not user_context:
+            return None
+        if isinstance(user_context, dict):
+            return user_context.get("user_id")
+        return getattr(user_context, "user_id", None)
+
+    def _is_uuid(self, val: str) -> bool:
+        try:
+            uuid.UUID(str(val))
+            return True
+        except ValueError:
+            return False
+
+    async def _check_mission_ownership(
+        self,
+        session: AsyncSession,
+        mission_id: uuid.UUID,
+        user_context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        Ownership enforcement - reuse Phase 2B-4 boundary
+        - No user_context (internal service call) -> allow
+        - dev-user -> allowed for MVP
+        - anonymous -> denied
+        - future/non-dev -> Mission.user_id must exactly match authenticated identity
+        - missing mission linkage -> fail closed
+        """
+        user_id = self._get_user_id_from_context(user_context)
+        if user_id is None:
+            return
+        if user_id == "dev-user":
+            return
+        if user_id == "anonymous":
+            raise PermissionDeniedError("Anonymous user cannot access jobs")
+
+        try:
+            result = await session.execute(select(Mission).where(Mission.id == mission_id))
+            mission = result.scalar_one_or_none()
+        except Exception:
+            raise PermissionDeniedError(f"Failed to verify mission ownership for {mission_id}")
+
+        if not mission:
+            raise PermissionDeniedError(f"Mission {mission_id} not found - orphan job denied")
+
+        if not hasattr(mission, "user_id") or mission.user_id is None:
+            raise PermissionDeniedError(f"No valid ownership match for mission {mission_id} - mission has no owner, non-dev user denied")
+
+        try:
+            mission_user_id_str = str(mission.user_id)
+            context_user_id_str = str(user_id)
+            if mission_user_id_str == context_user_id_str:
+                return
+            try:
+                if uuid.UUID(mission_user_id_str) == uuid.UUID(context_user_id_str):
+                    return
+            except ValueError:
+                pass
+            raise PermissionDeniedError(f"Ownership mismatch for mission {mission_id} - user {user_id} does not own mission owned by {mission.user_id}")
+        except PermissionDeniedError:
+            raise
+        except Exception:
+            raise PermissionDeniedError(f"Failed to verify ownership for mission {mission_id}")
+
+    async def _check_job_ownership(
+        self,
+        session: AsyncSession,
+        job: MissionJob,
+        user_context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not job.mission_id:
+            raise PermissionDeniedError("Job has no mission linkage - fail closed")
+        await self._check_mission_ownership(session, job.mission_id, user_context)
 
     async def create_job(
         self,
@@ -98,16 +172,13 @@ class JobService:
         payload: Optional[Dict[str, Any]] = None,
         idempotency_key: Optional[str] = None,
         max_retries: int = 3,
+        user_context: Optional[Dict[str, Any]] = None,
     ) -> MissionJob:
-        """
-        Create durable job for mission execution
-        Idempotency: unique (mission_id, idempotency_key) prevents duplicate starts
-        If idempotency_key provided and job exists, return existing job (idempotent)
-        If no idempotency_key, enforce one active execution per mission via DB constraint
-        """
         _validate_payload(payload)
 
-        # If idempotency_key provided, check for existing job first (idempotent return)
+        if user_context:
+            await self._check_mission_ownership(session, mission_id, user_context)
+
         if idempotency_key:
             existing_query = select(MissionJob).where(
                 and_(
@@ -118,10 +189,10 @@ class JobService:
             result = await session.execute(existing_query)
             existing = result.scalar_one_or_none()
             if existing:
+                if user_context:
+                    await self._check_job_ownership(session, existing, user_context)
                 return existing
 
-        # Check for active job for this mission if no idempotency key or as fallback
-        # Enforce one active execution per mission
         active_query = select(MissionJob).where(
             and_(
                 MissionJob.mission_id == mission_id,
@@ -131,21 +202,7 @@ class JobService:
         active_result = await session.execute(active_query)
         active_job = active_result.scalar_one_or_none()
         if active_job:
-            # If active job exists and idempotency_key matches, return it (already handled above)
-            # If active job exists and no idempotency_key provided, we should prevent duplicate active
-            # But if idempotency_key is different, we should still prevent duplicate active per spec fallback
-            # So if there's already active job, return it or raise conflict?
-            # Spec: Repeated requests with same Idempotency-Key must return existing job rather than duplicate
-            # For different keys, enforce one active per mission via DB constraint
-            # We'll return active job if idempotency_key is None or different? Actually we should raise conflict for different key if active exists
-            # But to be idempotent and prevent duplicate active, we will raise ConflictError for active exists when idempotency_key is different
-            # However if idempotency_key is same, we already returned above
-            # So for active exists and different or no idempotency key, raise conflict
             if idempotency_key is None or active_job.idempotency_key != idempotency_key:
-                # If active job has same mission and is active, prevent duplicate
-                # We can return active job for idempotency? Spec says enforce one active per mission with constraint
-                # We'll raise conflict to make explicit, but also allow returning active if client retries without idempotency key?
-                # Decision: raise ConflictError with active job info
                 raise ConflictError(
                     f"Mission {mission_id} already has active execution {active_job.execution_id} status {active_job.status}",
                     details={
@@ -179,9 +236,7 @@ class JobService:
             await session.flush()
             await session.refresh(job)
         except IntegrityError as e:
-            # Unique constraint violation - duplicate active or duplicate idempotency
             await session.rollback()
-            # Try to fetch existing job for idempotency
             if idempotency_key:
                 existing_query = select(MissionJob).where(
                     and_(
@@ -192,9 +247,10 @@ class JobService:
                 result = await session.execute(existing_query)
                 existing = result.scalar_one_or_none()
                 if existing:
+                    if user_context:
+                        await self._check_job_ownership(session, existing, user_context)
                     return existing
 
-            # Check active job
             active_query = select(MissionJob).where(
                 and_(
                     MissionJob.mission_id == mission_id,
@@ -217,18 +273,30 @@ class JobService:
 
         return job
 
-    async def get_job(self, session: AsyncSession, job_id: uuid.UUID) -> MissionJob:
+    async def get_job(
+        self,
+        session: AsyncSession,
+        job_id: uuid.UUID,
+        user_context: Optional[Dict[str, Any]] = None,
+    ) -> MissionJob:
         result = await session.execute(select(MissionJob).where(MissionJob.id == job_id))
         job = result.scalar_one_or_none()
         if not job:
             raise NotFoundError(f"Job {job_id} not found")
+        await self._check_job_ownership(session, job, user_context)
         return job
 
-    async def get_job_by_execution(self, session: AsyncSession, execution_id: uuid.UUID) -> MissionJob:
+    async def get_job_by_execution(
+        self,
+        session: AsyncSession,
+        execution_id: uuid.UUID,
+        user_context: Optional[Dict[str, Any]] = None,
+    ) -> MissionJob:
         result = await session.execute(select(MissionJob).where(MissionJob.execution_id == execution_id))
         job = result.scalar_one_or_none()
         if not job:
             raise NotFoundError(f"Job with execution_id {execution_id} not found")
+        await self._check_job_ownership(session, job, user_context)
         return job
 
     async def list_jobs(
@@ -238,13 +306,32 @@ class JobService:
         status: Optional[str] = None,
         limit: int = 20,
         offset: int = 0,
+        user_context: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[MissionJob], int]:
+        user_id = self._get_user_id_from_context(user_context)
+        if user_id == "anonymous":
+            raise PermissionDeniedError("Anonymous user cannot list jobs")
+
+        if mission_id and user_context:
+            await self._check_mission_ownership(session, mission_id, user_context)
+
         query = select(MissionJob)
         count_query = select(func.count()).select_from(MissionJob)
 
         if mission_id:
             query = query.where(MissionJob.mission_id == mission_id)
             count_query = count_query.where(MissionJob.mission_id == mission_id)
+        else:
+            if user_id and user_id not in ("dev-user", None):
+                try:
+                    if self._is_uuid(user_id):
+                        uid = uuid.UUID(str(user_id))
+                        query = query.join(Mission, MissionJob.mission_id == Mission.id).where(Mission.user_id == uid)
+                        count_query = count_query.join(Mission, MissionJob.mission_id == Mission.id).where(Mission.user_id == uid)
+                    else:
+                        return [], 0
+                except Exception:
+                    return [], 0
 
         if status:
             if status not in JOB_STATUSES:
@@ -267,15 +354,7 @@ class JobService:
         worker_id: str,
         lease_timeout: int = LEASE_TIMEOUT_SECONDS,
     ) -> Optional[MissionJob]:
-        """
-        Claim pending job using SELECT ... FOR UPDATE SKIP LOCKED
-        Atomically sets running, locked_by, locked_at, heartbeat_at
-        Returns claimed job or None if no pending jobs
-        """
-        # Use raw SQL for FOR UPDATE SKIP LOCKED to ensure Postgres-safe locking
-        # For SQLite (tests), SKIP LOCKED is not supported, fallback to simple select
         try:
-            # Try Postgres-style with SKIP LOCKED
             query = text(
                 """
                 SELECT id FROM mission_jobs
@@ -291,7 +370,6 @@ class JobService:
                 return None
 
             job_id = row[0]
-            # Now fetch and update atomically within same transaction
             job_query = select(MissionJob).where(MissionJob.id == job_id).with_for_update()
             job_result = await session.execute(job_query)
             job = job_result.scalar_one_or_none()
@@ -312,8 +390,6 @@ class JobService:
             return job
 
         except Exception as e:
-            # Fallback for SQLite (tests) - no SKIP LOCKED support
-            # Use simple select and update with optimistic locking
             try:
                 query = select(MissionJob).where(MissionJob.status == "pending").order_by(MissionJob.created_at.asc()).limit(1)
                 result = await session.execute(query)
@@ -347,10 +423,11 @@ class JobService:
         if status not in JOB_STATUSES:
             raise ValidationError(f"Invalid status: {status}")
 
-        job = await self.get_job(session, job_id)
+        res = await session.execute(select(MissionJob).where(MissionJob.id == job_id))
+        job = res.scalar_one_or_none()
+        if not job:
+            raise NotFoundError(f"Job {job_id} not found")
 
-        # Validate transition? For now allow any, but enforce terminal states
-        # Terminal states should not transition back to active unless explicitly allowed
         terminal = {"completed", "failed", "cancelled"}
         if job.status in terminal and status not in terminal:
             raise ValidationError(f"Cannot transition from terminal {job.status} to {status}")
@@ -362,7 +439,6 @@ class JobService:
             job.error = error
         job.updated_at = datetime.now(timezone.utc)
 
-        # If terminal, clear lease
         if status in terminal:
             job.locked_at = None
             job.heartbeat_at = None
@@ -379,17 +455,16 @@ class JobService:
         job_id: uuid.UUID,
         worker_id: str,
     ) -> MissionJob:
-        """
-        Renew heartbeat for running job
-        Only worker that owns job can heartbeat
-        """
-        job = await self.get_job(session, job_id)
+        result = await session.execute(select(MissionJob).where(MissionJob.id == job_id))
+        job = result.scalar_one_or_none()
+        if not job:
+            raise NotFoundError(f"Job {job_id} not found")
 
         if job.locked_by != worker_id:
-            raise ValidationError(f"Job {job_id} not owned by worker {worker_id}")
+            raise ValidationError(f"Job {job_id} not owned by worker {worker_id} - ownership lost")
 
         if job.status not in ("running", "awaiting_approval", "paused"):
-            raise ValidationError(f"Cannot heartbeat job in status {job.status}")
+            raise ValidationError(f"Cannot heartbeat job in status {job.status} - job cancelled or completed")
 
         now = datetime.now(timezone.utc)
         job.heartbeat_at = now
@@ -406,13 +481,11 @@ class JobService:
         job_id: uuid.UUID,
         worker_id: str,
     ) -> MissionJob:
-        """
-        Release job back to pending (e.g., on worker failure or approval pause)
-        Only owner can release, or if lease expired
-        """
-        job = await self.get_job(session, job_id)
+        res = await session.execute(select(MissionJob).where(MissionJob.id == job_id))
+        job = res.scalar_one_or_none()
+        if not job:
+            raise NotFoundError(f"Job {job_id} not found")
 
-        # Allow release if owned by worker or lease expired
         now = datetime.now(timezone.utc)
         lease_expired = False
         if job.heartbeat_at:
@@ -438,17 +511,18 @@ class JobService:
         self,
         session: AsyncSession,
         job_id: uuid.UUID,
+        user_context: Optional[Dict[str, Any]] = None,
     ) -> MissionJob:
-        """
-        Cancel job - pending → cancelled, running/awaiting_approval/paused → cancelled
-        Completed/failed/cancelled → idempotent
-        """
-        job = await self.get_job(session, job_id)
+        res = await session.execute(select(MissionJob).where(MissionJob.id == job_id))
+        job = res.scalar_one_or_none()
+        if not job:
+            raise NotFoundError(f"Job {job_id} not found")
+
+        await self._check_job_ownership(session, job, user_context)
 
         if job.status in ("completed", "failed", "cancelled"):
-            return job  # idempotent
+            return job
 
-        # Allow cancellation from active states
         if job.status not in ACTIVE_JOB_STATUSES:
             raise ValidationError(f"Cannot cancel job in status {job.status}")
 
@@ -467,10 +541,11 @@ class JobService:
         self,
         session: AsyncSession,
         mission_id: uuid.UUID,
+        user_context: Optional[Dict[str, Any]] = None,
     ) -> List[MissionJob]:
-        """
-        Cancel all active jobs for mission
-        """
+        if user_context:
+            await self._check_mission_ownership(session, mission_id, user_context)
+
         query = select(MissionJob).where(
             and_(
                 MissionJob.mission_id == mission_id,
@@ -498,21 +573,8 @@ class JobService:
         session: AsyncSession,
         lease_timeout: int = LEASE_TIMEOUT_SECONDS,
     ) -> List[MissionJob]:
-        """
-        Recover stale jobs whose heartbeat/lease expired
-        Only recover when heartbeat/lease genuinely expired, not merely locked_at older than 5m
-        Uses heartbeat_at if available, else locked_at
-        Test: healthy long-running worker NOT reclaimed, crashed worker with expired lease IS reclaimed
-        """
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(seconds=lease_timeout)
-
-        # Find jobs where heartbeat_at < cutoff OR (heartbeat_at is null AND locked_at < cutoff) AND status in active running states
-        # For awaiting_approval and paused, we use longer timeout? For now same timeout but could be configurable
-        # Actually for awaiting_approval, heartbeat should still be renewed by worker waiting for approval? Or worker exits?
-        # For this PR, we consider running jobs only for stale recovery, not awaiting_approval (which is waiting for human)
-        # But spec says find jobs whose lease expired and move back to pending or recover via checkpoint
-        # For this PR, only durable job recovery, not checkpoint resume yet
 
         query = select(MissionJob).where(
             and_(
@@ -529,16 +591,17 @@ class JobService:
 
         recovered = []
         for job in stale_jobs:
-            # Move back to pending for retry if attempts < max_retries, else failed
+            previous_worker = job.locked_by
+
             if job.attempts < job.max_retries:
                 job.status = "pending"
+                job.error = f"Recovered from stale lease, previous worker {previous_worker} heartbeat expired"
                 job.locked_at = None
                 job.heartbeat_at = None
                 job.locked_by = None
-                job.error = f"Recovered from stale lease, previous worker {job.locked_by} heartbeat expired"
             else:
                 job.status = "failed"
-                job.error = f"Failed after {job.attempts} attempts, last worker {job.locked_by} lease expired"
+                job.error = f"Failed after {job.attempts} attempts, last worker {previous_worker} lease expired"
                 job.locked_at = None
                 job.heartbeat_at = None
                 job.locked_by = None
@@ -551,5 +614,4 @@ class JobService:
         return recovered
 
 
-# Singleton
 job_service = JobService()

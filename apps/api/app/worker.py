@@ -1,42 +1,18 @@
 """
 Worker Service - Phase 3 PR 3.1 Durable Worker + Mission Job System
-
-Requirements:
-- async
-- bounded worker count
-- configurable worker ID
-- configurable polling interval
-- no API request owns mission execution
-- worker invokes existing orchestration service
-- worker handles success/failure/retry
-- bounded retries
-- emits appropriate events
-- Do not use in-process FastAPI background task as durable worker
-- Lease/heartbeat: locked_at + heartbeat_at + configurable lease timeout, worker periodically renews heartbeat
-- Test: healthy long-running worker NOT reclaimed, crashed worker with expired lease IS reclaimed
-
-Architecture:
-POST /missions/{id}/start → JobService → mission_jobs → Worker → Orchestrator/LangGraph
-
-Worker is a separate process, not FastAPI background task. For MVP, single process with async worker pool.
-Can later be replaced by multiple worker processes (each with own worker ID) polling same job table.
-
-Document how this can later be replaced by multiple worker processes:
-- Each worker has unique worker_id
-- All workers poll same mission_jobs table with SELECT FOR UPDATE SKIP LOCKED
-- Only one worker claims a pending job atomically
-- Workers can run on different hosts, same DB
-- Lease/heartbeat prevents duplicate execution
-- Future: replace polling with LISTEN/NOTIFY or Redis Streams for lower latency
-
-This PR only provides durable job recovery, not checkpoint-based resume yet (deferred to PR 3.2).
+Fixes per PR #8 review:
+- Heartbeat uses independent AsyncSession / transaction, not shared execution session
+- Heartbeat transaction: BEGIN verify job_id + locked_by + valid status update heartbeat_at COMMIT
+- Execution session remains independent
+- If heartbeat fails because ownership lost/cancelled, surface to worker and stop unsafe continuation
 """
 
 import asyncio
 import uuid
 import logging
 from datetime import datetime, timezone
-from typing import Optional, List
+from typing import Optional, Callable, Awaitable
+
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 
 from app.config import settings
@@ -51,10 +27,6 @@ logger = logging.getLogger(__name__)
 
 
 class MissionWorker:
-    """
-    Durable mission worker - async, bounded, configurable
-    """
-
     def __init__(
         self,
         worker_id: Optional[str] = None,
@@ -62,6 +34,7 @@ class MissionWorker:
         lease_timeout: int = LEASE_TIMEOUT_SECONDS,
         heartbeat_interval: float = HEARTBEAT_INTERVAL_SECONDS,
         max_retries: int = 3,
+        session_factory: Optional[Callable[[], Awaitable[AsyncSession]]] = None,
     ):
         self.worker_id = worker_id or f"worker-{uuid.uuid4().hex[:8]}"
         self.poll_interval = poll_interval
@@ -71,10 +44,16 @@ class MissionWorker:
         self._running = False
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._current_job_id: Optional[uuid.UUID] = None
+        self._session_factory = session_factory
+        self._heartbeat_failed = False
+        self._heartbeat_failure_reason: Optional[str] = None
+
+    def set_session_factory(self, factory):
+        self._session_factory = factory
 
     async def _get_session_factory(self):
-        # Create engine and session factory from settings
-        # For tests, this will be overridden
+        if self._session_factory:
+            return None, self._session_factory
         engine = create_async_engine(settings.database_url, echo=False)
         factory = async_sessionmaker(engine, expire_on_commit=False)
         return engine, factory
@@ -84,35 +63,39 @@ class MissionWorker:
         session: AsyncSession,
         job_id: uuid.UUID,
     ) -> bool:
-        """
-        Execute single job - isolated execution method
-        Reuses existing orchestrator and LangGraph implementation
-        Do not redesign graph nodes
-        Returns True if success, False if failed
-        """
         from app.services.orchestrator import orchestrator_service
 
         try:
-            # Get job
             job = await job_service.get_job(session, job_id)
 
-            # Check if cancelled before execution
             if job.status == "cancelled":
                 logger.info(f"Worker {self.worker_id} job {job_id} already cancelled, skipping")
                 return True
 
-            # Set heartbeat for this job
             self._current_job_id = job_id
+            self._heartbeat_failed = False
+            self._heartbeat_failure_reason = None
 
-            # Start heartbeat task
-            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(session, job_id))
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(job_id))
 
             try:
-                # Invoke existing orchestration service - isolated method
-                # This is the long-running execution ownership moved from HTTP request → Worker
                 result = await orchestrator_service.start_mission(session, job.mission_id)
 
-                # On success, update job completed
+                if self._heartbeat_failed:
+                    logger.warning(
+                        f"Worker {self.worker_id} job {job_id} heartbeat failed during execution: {self._heartbeat_failure_reason} - stopping unsafe continuation"
+                    )
+                    try:
+                        if self._session_factory:
+                            async with self._session_factory() as check_session:
+                                fresh_job = await job_service.get_job(check_session, job_id)
+                                if fresh_job.status == "cancelled":
+                                    logger.info(f"Worker {self.worker_id} job {job_id} cancelled during execution, aborting")
+                                    return True
+                    except Exception:
+                        pass
+                    return False
+
                 await job_service.update_job_status(
                     session,
                     job_id,
@@ -120,16 +103,23 @@ class MissionWorker:
                     result=result,
                 )
 
-                # Emit mission completion event? Orchestrator already emits mission_status_changed
                 logger.info(f"Worker {self.worker_id} job {job_id} completed for mission {job.mission_id}")
-
                 return True
 
             except Exception as e:
                 logger.warning(f"Worker {self.worker_id} job {job_id} failed: {e}")
 
-                # Check if cancelled during execution
-                # Refresh job to see if cancelled
+                if self._heartbeat_failed:
+                    try:
+                        if self._session_factory:
+                            async with self._session_factory() as check_session:
+                                fresh_job = await job_service.get_job(check_session, job_id)
+                                if fresh_job.status == "cancelled":
+                                    logger.info(f"Worker {self.worker_id} job {job_id} cancelled during execution")
+                                    return True
+                    except Exception:
+                        pass
+
                 try:
                     await session.refresh(job)
                     if job.status == "cancelled":
@@ -138,9 +128,7 @@ class MissionWorker:
                 except Exception:
                     pass
 
-                # Handle failure/retry - bounded retries
                 if job.attempts < job.max_retries:
-                    # Retry: move back to pending
                     await job_service.update_job_status(
                         session,
                         job_id,
@@ -149,14 +137,12 @@ class MissionWorker:
                     )
                     logger.info(f"Worker {self.worker_id} job {job_id} retry {job.attempts}/{job.max_retries}")
                 else:
-                    # Failed after max retries
                     await job_service.update_job_status(
                         session,
                         job_id,
                         "failed",
                         error=str(e)[:1000],
                     )
-                    # Also update mission status to failed via MissionService
                     try:
                         await mission_service.update_mission(
                             session,
@@ -166,7 +152,6 @@ class MissionWorker:
                     except Exception:
                         pass
 
-                    # Emit error event
                     try:
                         await event_bus_service.emit(
                             session,
@@ -188,7 +173,6 @@ class MissionWorker:
                 return False
 
             finally:
-                # Stop heartbeat task
                 if self._heartbeat_task:
                     self._heartbeat_task.cancel()
                     try:
@@ -202,32 +186,41 @@ class MissionWorker:
             logger.warning(f"Worker {self.worker_id} execute_job {job_id} outer failure: {e}")
             return False
 
-    async def _heartbeat_loop(self, session: AsyncSession, job_id: uuid.UUID):
-        """
-        Periodically renew heartbeat for running job
-        """
+    async def _heartbeat_loop(self, job_id: uuid.UUID):
         while True:
             try:
                 await asyncio.sleep(self.heartbeat_interval)
-                # Need new session for heartbeat? For simplicity, use same session if possible, but in real worker we need separate session factory
-                # For this MVP, we try to heartbeat with current session, but if session is busy, we skip
-                # In production worker, each heartbeat would use its own session
+
+                if not self._session_factory:
+                    logger.debug(f"Worker {self.worker_id} no session_factory for heartbeat, skipping")
+                    continue
+
                 try:
-                    await job_service.heartbeat_job(session, job_id, self.worker_id)
-                    logger.debug(f"Worker {self.worker_id} heartbeat for job {job_id}")
+                    async with self._session_factory() as hb_session:
+                        await job_service.heartbeat_job(hb_session, job_id, self.worker_id)
+                        await hb_session.commit()
+                    logger.debug(f"Worker {self.worker_id} heartbeat committed for job {job_id}")
+
                 except Exception as e:
-                    logger.debug(f"Worker {self.worker_id} heartbeat failed for {job_id}: {e}")
+                    error_str = str(e)
+                    logger.warning(f"Worker {self.worker_id} heartbeat failed for {job_id}: {e}")
+
+                    if "not owned" in error_str.lower() or "ownership" in error_str.lower() or "cancelled" in error_str.lower() or "completed" in error_str.lower() or "failed" in error_str.lower():
+                        self._heartbeat_failed = True
+                        self._heartbeat_failure_reason = error_str
+                        logger.warning(
+                            f"Worker {self.worker_id} heartbeat ownership lost for {job_id}: {error_str} - will stop unsafe continuation"
+                        )
+                        break
+                    continue
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.debug(f"Worker {self.worker_id} heartbeat loop error: {e}")
-                # Continue loop, don't crash worker
+                continue
 
     async def run_once(self, session: AsyncSession) -> Optional[uuid.UUID]:
-        """
-        Run one iteration: claim pending job and execute
-        Returns job_id if claimed and executed, None if no job
-        """
         try:
             job = await job_service.claim_job(session, self.worker_id, lease_timeout=self.lease_timeout)
             if not job:
@@ -244,16 +237,15 @@ class MissionWorker:
             return None
 
     async def run_forever(self, session_factory=None):
-        """
-        Run forever polling for jobs - for separate worker process
-        """
+        if session_factory:
+            self._session_factory = session_factory
+
         self._running = True
         logger.info(f"Worker {self.worker_id} starting with poll_interval={self.poll_interval}s lease_timeout={self.lease_timeout}s")
 
-        # On startup, recover stale jobs
         try:
-            if session_factory:
-                async with session_factory() as session:
+            if self._session_factory:
+                async with self._session_factory() as session:
                     recovered = await job_service.recover_stale_jobs(session, lease_timeout=self.lease_timeout)
                     if recovered:
                         logger.info(f"Worker {self.worker_id} recovered {len(recovered)} stale jobs on startup")
@@ -263,14 +255,13 @@ class MissionWorker:
 
         while self._running:
             try:
-                if session_factory:
-                    async with session_factory() as session:
+                if self._session_factory:
+                    async with self._session_factory() as session:
                         job_id = await self.run_once(session)
                         await session.commit()
                         if not job_id:
                             await asyncio.sleep(self.poll_interval)
                 else:
-                    # No session factory provided, sleep
                     await asyncio.sleep(self.poll_interval)
 
             except asyncio.CancelledError:
@@ -285,16 +276,10 @@ class MissionWorker:
         self._running = False
 
 
-# Singleton for API process to trigger recovery on startup (not durable worker, but for restart recovery)
-# Real durable worker is separate process, but API can also recover stale jobs on startup
 worker_service = MissionWorker()
 
 
 async def recover_stale_jobs_on_startup(session: AsyncSession):
-    """
-    On API startup, find jobs whose lease expired and move back to pending
-    This is durable job recovery, not checkpoint-based resume (deferred to PR 3.2)
-    """
     try:
         recovered = await job_service.recover_stale_jobs(session, lease_timeout=LEASE_TIMEOUT_SECONDS)
         if recovered:

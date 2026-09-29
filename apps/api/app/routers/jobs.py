@@ -1,8 +1,9 @@
 """
 Jobs Router - Phase 3 PR 3.1 Durable Worker
-GET /api/v1/missions/{id}/jobs - list jobs for mission
-GET /api/v1/jobs/{id} - get job
-POST /api/v1/jobs/{id}/cancel - cancel job
+Fixes per PR #8 review:
+- Enforce job API ownership / mission scoping via JobService ownership boundary
+- Reuse Phase 2B-4 pattern: dev-user allowed, anonymous denied, future/non-dev must match mission.user_id
+- Orphan/missing mission linkage fails closed
 """
 
 import uuid
@@ -32,7 +33,7 @@ async def get_job(
     user: dict = Depends(get_current_user),
 ):
     try:
-        job = await job_service.get_job(db, job_id)
+        job = await job_service.get_job(db, job_id, user_context=user)
         return {
             "id": str(job.id),
             "mission_id": str(job.mission_id),
@@ -61,7 +62,7 @@ async def cancel_job(
     user: dict = Depends(get_current_user),
 ):
     try:
-        job = await job_service.cancel_job(db, job_id)
+        job = await job_service.cancel_job(db, job_id, user_context=user)
         return {
             "id": str(job.id),
             "mission_id": str(job.mission_id),
@@ -72,8 +73,6 @@ async def cancel_job(
         _handle_domain_error(e)
 
 
-# Also mount mission jobs list under missions router? We'll add separate endpoint in missions.py for simplicity, but also provide here via missions prefix in main
-# For clean routing, we add /missions/{mission_id}/jobs endpoint in this file but with different router
 mission_jobs_router = APIRouter(prefix="/missions", tags=["missions"])
 
 
@@ -87,11 +86,10 @@ async def list_mission_jobs(
     user: dict = Depends(get_current_user),
 ):
     try:
-        # Verify mission exists
         await mission_service.get_mission(db, mission_id)
 
         jobs, total = await job_service.list_jobs(
-            db, mission_id=mission_id, status=status, limit=limit, offset=offset
+            db, mission_id=mission_id, status=status, limit=limit, offset=offset, user_context=user
         )
 
         data = [
