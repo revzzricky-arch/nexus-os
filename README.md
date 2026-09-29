@@ -23,30 +23,33 @@ NEXUS is an independently designed **3D Agent Operating System / AI Agent Comman
 
 **3D Focus (Approved):** Mission runtime state only — agents, active tasks, workflows, tool activity, approval gates. Hybrid orbital agents + layered task DAG. No raw vector DB rendering.
 
-## Current Status: Scaffold Phase (v0.1.0-scaffold)
+## Current Status: Phase 2A — Polished Mission Control UI + 3D Experience (Frontend-Only Mock Runtime)
 
-This phase is **scaffold and 3D prototype only**. No real business logic yet.
+**Phase 1 Scaffold Completed:** Monorepo, frontend minimal 3D prototype, backend /health /version stubs, shared types, Docker Compose infra, CI, README. PR #1 feat/scaffold→main created and fixed (pythonpath fix).
 
-**Implemented in Scaffold:**
-- Monorepo skeleton (pnpm workspaces)
-- Frontend shell: Next.js 16.x + React 19 + TypeScript + Tailwind + shadcn/ui-compatible + Zustand + TanStack Query + Three.js + React Three Fiber 9 + Drei + Framer Motion
-  - Dark professional theme, desaturated violet accent, glass/translucent, subtle lighting, technical typography, no neon/gaming
-  - Responsive layout, navigation/sidebar, top status bar, dashboard shell, placeholder mission area, activity panel
-  - Minimal working 3D runtime prototype: Mission Core central orb, 3 placeholder agent nodes orbital, task nodes layered DAG, workflow splines, approval gate, event particles, camera controls
-- Backend shell: FastAPI with health/version endpoints, placeholder service interfaces (supervisor, agent runner, tool registry, permission, MCP manager stdio+Streamable HTTP, memory, RAG, approval, event bus, evaluation, SandboxService, ModelProvider OpenAI-compat/Anthropic/Ollama, EmbeddingProvider local-first)
-- Shared package: Strict TS types for Mission, Agent, Task, Tool, Approval, AgentState, MissionState, EventEnvelope + realtime event contract (no Redis/WS streaming yet)
-- Infra: Docker Compose with web, api, postgres+pgvector, redis, sandbox-runner placeholder (no exec), otel-collector placeholder
-- Scripts, CI workflow (typecheck/build checks), .gitignore, .env.example
-- Docs: architecture.md v0.2 approved, 3d-design.md runtime model, ADR 001-012 with decisions D1-D10 recorded
+**Phase 2A Current (this branch feat/ui-mission-control):** Polished NexusOS Mission Control UI and 3D experience, frontend-only mock runtime. No real agent orchestration LangGraph MCP execution RAG database logic real LLM/API calls. Use mock runtime data. Future WebSocket replaceable.
 
-**NOT Implemented Yet (Honest Limitations):**
+**Implemented in Phase 2A:**
+- **Design System Polished:** Dark #09090b zinc-900/950 accent hsl 262 60% 58% violet, Geist/Inter + JetBrains Mono, glassmorphism subtle borders shadows gradients grid atmospheric lighting, Linear/Vercel/Stripe inspiration, avoid gaming/neon/clutter, shadow-soft glow-violet grid-fade reduced-motion focus-visible ring.
+- **App Shell:** TopBar NEXUS wordmark live system status operational dot active mission indicator notification bell settings profile version Phase2A tag. Sidebar Mission Control Missions Agents Memory Tools/MCP Approvals Observability Settings with icons counts badges runtime status card scaffold D1-D10 decisions. AppShell wrapper with background layers grid + radial gradients.
+- **Mission Control Page:** Desktop ~60% 3D runtime ~40% contextual: MissionHeader title type status elapsed time current phase progress, 3D canvas MissionCanvas, MissionComposer AI command interface "Investigate API incident..." types Research Code Analysis General prominent RUN MISSION button simulate transition, live ActivityFeed, AgentCards Supervisor Researcher Coder Analyst states IDLE PLANNING RUNNING WAITING WAITING_FOR_APPROVAL COMPLETED FAILED PAUSED selectable→detail panel, TaskProgress layered DAG nodes around core states PENDING QUEUED RUNNING COMPLETED FAILED BLOCKED clickable, MissionSummary token/cost mock, DetailPanel 2D primary info surface not exclusively 3D dependent, ApprovalModal hexagonal approval gates click opens 2D approval UI.
+- **Mock Runtime Architecture:** mock state→Zustand→UI→3D, typed models Mission Agent Task Tool Approval Event RuntimeState in lib/mock/data.ts lib/store/runtime.ts, 6 missions 4 agents 5 tasks 11 tools 3 approvals 10 events mock, Zustand store with setSelectedAgent setSelectedTask setSelectedApproval setActiveMission openApprovalModal approveApproval denyApproval runMission simulateEvent future WebSocket EventEnvelope replaceable.
+- **3D Refined:** MissionCore central geometry subtle rotation status ring activity pulse memory indicator not oversized physical transmission inner icosahedron. AgentNode orbital radius 2.8+ idx*0.3 octahedron/box/dodecahedron status violet/cyan/amber pulse restrained distinct visuals IDLE static PLANNING slow pulse RUNNING active pulse/orbit WAITING subdued WAITING_FOR_APPROVAL indicator COMPLETED settled FAILED error PAUSED dimmed no extreme emissive. TaskNode layered DAG radius 5.5+layer*1.8 box status colors clickable concise labels status connects to agents/workflow Text labels. WorkflowSplines elegant CatmullRom active subtle movement inactive subdued no noise arrow cone. ApprovalGate hexagonal torus amber pending rotation pulse. EventParticles minimal Points 30 particles tool activity upward drift violet/cyan/amber/emerald handoff/tool/memory/completion. Scene Canvas dpr[1,2] PerspectiveCamera OrbitControls damping limits good default framing calm not game Grid Environment fog.
+- **Pages:** / Mission Control polished, /missions cards status progress agent count created time open action, /agents cards state capabilities current task activity, /approvals pending cards risk action agent approve/deny, /tools registry state permission MCP badge stdio Streamable HTTP SSE legacy forbidden, /observability metrics agent activity tool calls latency errors token/cost mock, /settings model provider placeholders appearance runtime security dev config D1-D10, /memory shared mission memory RAG local-first.
+- **Responsive:** Desktop full 3D tablet smaller side panels mobile 2D-first simplified fallback when is3DEnabled false.
+- **Animation:** Framer Motion 2D transitions, R3F 3D communicate status activity transition focus, reduced-motion handling via CSS prefers-reduced-motion.
+- **Accessibility:** Semantic buttons keyboard nav focus states aria labels contrast reduced-motion UI not exclusively 3D dependent.
+- **Technical:** Next 16.3.6 React19 TS strict Tailwind shadcn-compatible Zustand TanStack Query Three.js R3F9 Drei Framer Motion no unnecessary deps no backend features. Build passes 8 routes static.
+- **Security:** No API keys tokens credentials eval exec compile unnecessary network.
+
+**NOT Implemented Yet (Honest Limitations — Future Phases):**
 - Real agent orchestration, supervisor decomposition, LangGraph DAG execution
 - Real MCP integrations (no connections to real servers)
 - Real RAG ingestion, chunking, embedding pipeline
 - Real model provider API calls (no LLM calls, no API keys)
-- Real approvals, tool execution, SandboxService container isolation
+- Real approvals persistence, tool execution, SandboxService container isolation
 - Real memory, vector search, hybrid search
-- Real Redis event bus, WebSocket streaming (contract only)
+- Real Redis event bus, WebSocket streaming (contract only, mock simulateEvent)
 - Auth UI, user accounts, multi-tenancy, RBAC, Kubernetes, cloud deployment, voice, custom agent builder, workflow editor, knowledge graph, advanced shaders, browser automation, unrestricted shell exec
 
 See `docs/architecture.md` for full architecture and `docs/3d-design.md` for 3D runtime model.
