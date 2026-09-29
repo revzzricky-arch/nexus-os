@@ -7,17 +7,50 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.config import settings
-from app.routers import health, missions, tasks, agents, tools, mcp, memory, rag, approvals, ws, tool_calls
+from app.routers import health, missions, tasks, agents, tools, mcp, memory, rag, approvals, ws, tool_calls, jobs
 from app.core.exceptions import DomainError
+
+from contextlib import asynccontextmanager
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: recover stale jobs (durable job recovery, not checkpoint resume)
+    try:
+        from app.db.session import AsyncSessionLocal
+        from app.worker import recover_stale_jobs_on_startup
+
+        async with AsyncSessionLocal() as session:
+            recovered = await recover_stale_jobs_on_startup(session)
+            if recovered:
+                await session.commit()
+                logger.info(f"Startup recovered {len(recovered)} stale jobs")
+    except Exception as e:
+        logger.warning(f"Startup stale recovery failed: {e}")
+
+    yield
+
+    # Shutdown: close DB
+    try:
+        from app.db.session import close_db
+
+        await close_db()
+    except Exception:
+        pass
+
 
 # Create FastAPI app
 app = FastAPI(
     title="NEXUS API (Codename)",
-    description="3D Agent Operating System / AI Agent Command Center - Phase 2B-2 Mission API + EventBus Foundation. Temporary codename NEXUS, public name TBD.",
+    description="3D Agent Operating System / AI Agent Command Center - Phase 3 Durable Worker + Mission Jobs. Temporary codename NEXUS, public name TBD.",
     version=settings.version,
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
+    lifespan=lifespan,
 )
 
 # CORS - allow frontend
@@ -56,6 +89,8 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 # Include routers - health/version at root, others under /api/v1
 app.include_router(health.router, tags=["system"])
 app.include_router(missions.router, prefix="/api/v1")
+app.include_router(jobs.mission_jobs_router, prefix="/api/v1")
+app.include_router(jobs.router, prefix="/api/v1")
 app.include_router(tasks.router, prefix="/api/v1")
 app.include_router(agents.router, prefix="/api/v1")
 app.include_router(tools.router, prefix="/api/v1")

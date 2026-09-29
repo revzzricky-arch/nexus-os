@@ -17,7 +17,7 @@ Bearer Auth D4 reused
 import uuid
 from datetime import datetime
 from typing import Optional, List, Any
-from fastapi import APIRouter, Depends, Query, Path, HTTPException
+from fastapi import APIRouter, Depends, Query, Path, HTTPException, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
@@ -137,37 +137,95 @@ async def cancel_mission(
     user: dict = Depends(get_current_user),
 ):
     """
-    Idempotent cancel - if already cancelled returns existing mission
-    Validates transition, persists cancelled, emits mission_status_changed
+    Phase 3: Idempotent cancel integrating job state
+    - pending → cancelled
+    - running → cancellation requested / cancelled (worker observes stop safely)
+    - awaiting_approval → cancelled
+    - completed/failed/cancelled → idempotent (do not error)
+    - Validates via MissionService, does not bypass
+    - Also cancels associated jobs via JobService
+    - Consistent transaction: mission + jobs cancelled atomically, job failures surface and rollback
     """
     try:
+        from app.services.job import job_service
+
+        # Validate via MissionService (do not bypass) - mission cancellation first in same transaction
         mission = await mission_service.cancel_mission(db, mission_id)
+
+        # Integrate job cancellation with ownership enforcement - do NOT swallow errors
+        # If job cancellation fails, mission cancellation must roll back to avoid inconsistent state
+        # (mission cancelled but job still running)
+        await job_service.cancel_jobs_for_mission(db, mission_id, user_context=user)
+
         return mission
     except DomainError as e:
         _handle_domain_error(e)
 
 
-@router.post("/{mission_id}/start", response_model=dict)
+@router.post("/{mission_id}/start", response_model=dict, status_code=202)
 async def start_mission(
     mission_id: uuid.UUID = Path(..., description="Mission ID"),
     db: AsyncSession = Depends(get_db),
     user: dict = Depends(get_current_user),
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ):
     """
-    Phase 2B-3: Start mission orchestration via Supervisor + LangGraph
-    - verify mission exists
-    - verify valid starting state (draft, planned, failed, paused)
-    - invoke Supervisor/LangGraph orchestration
-    - transition mission through proper lifecycle draft→decomposing→planned→running→completed/failed
-    - return mission execution info
+    Phase 3 PR 3.1: Durable mission start
+    - Authenticate + validate state
+    - Create durable job via JobService
+    - Return 202 with mission_id, execution_id, job_id
+    - No block, no long-running execution in request
+    - Repeated same Idempotency-Key returns existing job
+    - Idempotency via client header Idempotency-Key unique (mission_id,idempotency_key) + fallback one active per mission DB constraint
 
-    MVP execution mechanism: synchronous within request for now, but isolated behind orchestrator service boundary
-    so it can be replaced by durable worker/queue later (documented in ADR 015).
-    Does NOT run long-lived orchestration that would block indefinitely - each node is quick and deterministic.
+    Architecture: POST /missions/{id}/start → JobService → mission_jobs → Worker → Orchestrator/LangGraph
     """
+    # FastAPI doesn't auto parse Idempotency-Key header unless declared, we accept optional param from header
+    # Try to get from request headers via dependency? Simpler: use header param
+    # Actually we need Header
     try:
-        result = await orchestrator_service.start_mission(db, mission_id)
-        return result
+        from app.services.job import job_service
+
+        # Verify mission exists and valid starting state (do not bypass MissionService validation)
+        # Allow start from draft, planned, failed, paused (same as before)
+        # MissionService.get_mission will raise if not found
+        existing_mission = await mission_service.get_mission(db, mission_id)
+        valid_start_states = ["draft", "planned", "failed", "paused"]
+        if existing_mission.status not in valid_start_states:
+            from app.core.exceptions import ValidationError
+
+            raise ValidationError(
+                f"Cannot start mission from status {existing_mission.status}",
+                details={
+                    "mission_id": str(mission_id),
+                    "current_status": existing_mission.status,
+                    "valid_start_states": valid_start_states,
+                },
+            )
+
+        # Extract Idempotency-Key from header if present
+        # Since we declared as optional param, FastAPI won't inject header automatically unless we use Header
+        # We'll handle fallback inside service if None - but we should try to read from request
+        # For this endpoint, we will attempt to get header via dependency injection in wrapper
+        # Actually we already have idempotency_key param, but need to read header - we will rely on service to handle None
+        # The caller can pass Idempotency-Key header, but we need to declare it properly
+        # We'll create job via JobService
+
+        job = await job_service.create_job(
+            db,
+            mission_id=mission_id,
+            idempotency_key=idempotency_key,
+            payload={"triggered_by": "api", "user": user.get("sub") if isinstance(user, dict) else None},
+            user_context=user,
+        )
+
+        return {
+            "mission_id": str(mission_id),
+            "execution_id": str(job.execution_id),
+            "job_id": str(job.id),
+            "status": job.status,
+            "idempotency_key": job.idempotency_key,
+        }
     except DomainError as e:
         _handle_domain_error(e)
     except Exception as ex:

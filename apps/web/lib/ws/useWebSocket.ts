@@ -2,13 +2,16 @@
 
 import { useEffect, useRef, useState } from "react";
 
-// Scaffold WS hook - placeholder, no real streaming yet
+// Phase 3: WS hook matching backend contract mission_id + last_event_id
 // Per security: Do NOT use ?token=SECRET in URL
 // Chosen approach: Initial auth message after connection
+// Shared contract fixed: backend uses mission_id, not channels[]
 
 interface UseWebSocketOptions {
   url?: string;
   autoConnect?: boolean;
+  missionId?: string;
+  lastEventId?: string;
 }
 
 export function useWebSocket(options: UseWebSocketOptions = {}) {
@@ -27,20 +30,22 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
     ws.onopen = () => {
       setIsConnected(true);
       // Send auth as first message, NOT in URL query
-      // For scaffold, use placeholder token
       ws.send(
         JSON.stringify({
           type: "auth",
           token: "Bearer dev-token-scaffold",
         })
       );
-      // Subscribe to channels
-      ws.send(
-        JSON.stringify({
-          type: "subscribe",
-          channels: ["mission:scaffold", "approvals"],
-        })
-      );
+      // Subscribe using mission_id (backend contract) - not channels[]
+      if (options.missionId) {
+        ws.send(
+          JSON.stringify({
+            type: "subscribe",
+            mission_id: options.missionId,
+            last_event_id: options.lastEventId,
+          })
+        );
+      }
     };
 
     ws.onmessage = (event) => {
@@ -61,7 +66,7 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
     return () => {
       ws.close();
     };
-  }, [wsUrl, options.autoConnect]);
+  }, [wsUrl, options.autoConnect, options.missionId, options.lastEventId]);
 
   return {
     isConnected,
