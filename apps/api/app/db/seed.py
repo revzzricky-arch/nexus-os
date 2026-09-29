@@ -102,10 +102,18 @@ async def seed_agents(session: AsyncSession) -> list[Agent]:
     return created
 
 
+async def seed_builtin_tools(session: AsyncSession):
+    """Seed builtin tools idempotently - Phase 2B-4"""
+    from app.services.tool_registry import tool_registry_service
+    tools = await tool_registry_service.seed_builtin_tools(session)
+    return tools
+
+
 async def seed_all(session: AsyncSession) -> dict:
     """
-    Seed all foundational data for Phase 2B-1
-    Only agents registry per PR scope (users deferred to later if needed)
+    Seed all foundational data for Phase 2B-1 + 2B-4
+    Agents registry + builtin tools
     """
     agents = await seed_agents(session)
-    return {"agents": agents}
+    tools = await seed_builtin_tools(session)
+    return {"agents": agents, "tools": tools}

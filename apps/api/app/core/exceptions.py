@@ -74,3 +74,33 @@ class UnauthorizedError(DomainError):
             details=details or {},
             status_code=401,
         )
+
+
+class NotFoundError(DomainError):
+    def __init__(self, message: str = "Not found", details: Optional[dict] = None):
+        super().__init__(
+            code="not_found",
+            message=message,
+            details=details or {},
+            status_code=404,
+        )
+
+
+class PermissionDeniedError(DomainError):
+    def __init__(self, message: str = "Permission denied", details: Optional[dict] = None):
+        super().__init__(
+            code="permission_denied",
+            message=message,
+            details=details or {},
+            status_code=403,
+        )
+
+
+class ConflictError(DomainError):
+    def __init__(self, message: str = "Conflict", details: Optional[dict] = None):
+        super().__init__(
+            code="conflict",
+            message=message,
+            details=details or {},
+            status_code=409,
+        )

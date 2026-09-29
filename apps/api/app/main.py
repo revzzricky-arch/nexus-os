@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.config import settings
-from app.routers import health, missions, tasks, agents, tools, mcp, memory, rag, approvals, ws
+from app.routers import health, missions, tasks, agents, tools, mcp, memory, rag, approvals, ws, tool_calls
 from app.core.exceptions import DomainError
 
 # Create FastAPI app
@@ -63,6 +63,7 @@ app.include_router(mcp.router, prefix="/api/v1")
 app.include_router(memory.router, prefix="/api/v1")
 app.include_router(rag.router, prefix="/api/v1")
 app.include_router(approvals.router, prefix="/api/v1")
+app.include_router(tool_calls.router, prefix="/api/v1")
 app.include_router(ws.router)
 
 

@@ -16,6 +16,7 @@ greenlet==3.0.3
 # Orchestration Foundation - PR 2B-3
 langgraph==0.6.11
 langchain-core==0.3.67
+jsonschema==4.23.0
 
 # Test
 pytest==8.3.2
