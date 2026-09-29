@@ -1,71 +1,120 @@
 "use client";
 
-import { useRef } from "react";
+import { useRef, useMemo } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 
 interface ApprovalGateProps {
+  id?: string;
   position: [number, number, number];
   status: string;
-  onClick?: () => void;
+  isSelected?: boolean;
+  onClick: () => void;
 }
 
-export function ApprovalGate({ position, status, onClick }: ApprovalGateProps) {
+export function ApprovalGate({ position, status, isSelected, onClick }: ApprovalGateProps) {
+  const groupRef = useRef<THREE.Group>(null);
   const meshRef = useRef<THREE.Mesh>(null);
 
   useFrame((state, delta) => {
-    if (meshRef.current) {
-      meshRef.current.rotation.z += delta * 0.5;
-      if (status === "pending") {
-        const scale = 1 + Math.sin(state.clock.elapsedTime * 2) * 0.1;
-        meshRef.current.scale.set(scale, scale, scale);
+    if (!groupRef.current) return;
+    const t = state.clock.elapsedTime;
+    if (status === "PENDING") {
+      // Subtle rotation pulse for pending
+      if (meshRef.current) {
+        meshRef.current.rotation.y += delta * 0.6;
+        const s = 1 + Math.sin(t * 2) * 0.08;
+        meshRef.current.scale.setScalar(s);
       }
     }
   });
 
-  const getColor = () => {
+  const visuals = useMemo(() => {
+    let color = "#71717a";
+    let emissive = "#71717a";
+    let intensity = 0.1;
+    let opacity = 0.7;
+
     switch (status) {
-      case "pending":
-        return "#fbbf24";
-      case "approved":
-        return "#34d399";
-      case "denied":
-        return "#f87171";
-      default:
-        return "#52525b";
+      case "PENDING":
+        color = "#f59e0b";
+        emissive = "#f59e0b";
+        intensity = 0.5;
+        break;
+      case "APPROVED":
+        color = "#10b981";
+        emissive = "#10b981";
+        intensity = 0.2;
+        break;
+      case "DENIED":
+        color = "#ef4444";
+        emissive = "#ef4444";
+        intensity = 0.2;
+        break;
+      case "EXPIRED":
+        color = "#52525b";
+        emissive = "#52525b";
+        intensity = 0.05;
+        opacity = 0.4;
+        break;
     }
-  };
+
+    if (isSelected) {
+      intensity = Math.max(intensity, 0.7);
+    }
+
+    return { color, emissive, intensity, opacity };
+  }, [status, isSelected]);
 
   return (
-    <group position={position}>
+    <group position={position} ref={groupRef}>
+      {/* Hexagonal torus - distinctive gate shape */}
       <mesh
         ref={meshRef}
-        rotation={[Math.PI / 2, 0, 0]}
         onClick={(e) => {
           e.stopPropagation();
-          onClick?.();
+          onClick();
         }}
         onPointerOver={() => {
           document.body.style.cursor = "pointer";
         }}
         onPointerOut={() => {
-          document.body.style.cursor = "default";
+          document.body.style.cursor = "auto";
         }}
       >
-        <torusGeometry args={[0.5, 0.05, 6, 24]} />
+        <torusGeometry args={[0.28, 0.04, 6, 6]} />
         <meshStandardMaterial
-          color={getColor()}
-          emissive={getColor()}
-          emissiveIntensity={0.6}
+          color={visuals.color}
+          emissive={visuals.emissive}
+          emissiveIntensity={visuals.intensity}
           transparent
-          opacity={0.8}
+          opacity={visuals.opacity}
+          roughness={0.4}
+          metalness={0.3}
         />
       </mesh>
+
       {/* Inner hex */}
-      <mesh rotation={[Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[0.3, 0.35, 6]} />
-        <meshBasicMaterial color={getColor()} transparent opacity={0.3} side={THREE.DoubleSide} />
+      <mesh rotation={[0, 0, Math.PI / 6]}>
+        <torusGeometry args={[0.15, 0.015, 6, 6]} />
+        <meshStandardMaterial color={visuals.color} transparent opacity={0.4} emissive={visuals.emissive} emissiveIntensity={0.2} />
       </mesh>
+
+      {/* Selection highlight */}
+      {isSelected && (
+        <mesh>
+          <torusGeometry args={[0.38, 0.02, 6, 6]} />
+          <meshBasicMaterial color="#ffffff" transparent opacity={0.2} />
+        </mesh>
+      )}
+
+      {/* Status indicator dot */}
+      {status === "PENDING" && (
+        <mesh position={[0, 0.35, 0]}>
+          <sphereGeometry args={[0.05, 8, 8]} />
+          <meshStandardMaterial color="#f59e0b" emissive="#f59e0b" emissiveIntensity={0.8} />
+        </mesh>
+      )}
     </group>
   );
 }

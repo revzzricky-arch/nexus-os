@@ -1,8 +1,9 @@
 "use client";
 
-import { useRef, useState } from "react";
-import { Html } from "@react-three/drei";
+import { useRef, useMemo } from "react";
+import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
+import { Text } from "@react-three/drei";
 
 interface TaskNodeProps {
   id: string;
@@ -10,65 +11,133 @@ interface TaskNodeProps {
   position: [number, number, number];
   layer: number;
   title: string;
+  isSelected?: boolean;
+  onSelect?: () => void;
 }
 
-export function TaskNode({ id, status, position, layer, title }: TaskNodeProps) {
-  const [hovered, setHovered] = useState(false);
+export function TaskNode({ id, status, position, layer, title, isSelected, onSelect }: TaskNodeProps) {
+  const groupRef = useRef<THREE.Group>(null);
+  const meshRef = useRef<THREE.Mesh>(null);
 
-  const getColor = () => {
-    switch (status) {
-      case "running":
-        return "#8b5cf6";
-      case "completed":
-        return "#10b981";
-      case "failed":
-        return "#ef4444";
-      case "queued":
-        return "#52525b";
-      default:
-        return "#27272a";
+  useFrame((state, delta) => {
+    if (!meshRef.current) return;
+    const t = state.clock.elapsedTime;
+    if (status === "RUNNING") {
+      meshRef.current.rotation.y += delta * 0.8;
+      const s = 1 + Math.sin(t * 2) * 0.05;
+      meshRef.current.scale.setScalar(s);
+    } else if (status === "QUEUED") {
+      meshRef.current.rotation.y += delta * 0.15;
     }
-  };
+  });
+
+  const visuals = useMemo(() => {
+    let color = "#27272a";
+    let emissive = "#27272a";
+    let emissiveIntensity = 0.05;
+    let opacity = 0.9;
+
+    switch (status) {
+      case "PENDING":
+        color = "#27272a";
+        emissive = "#52525b";
+        emissiveIntensity = 0.05;
+        opacity = 0.6;
+        break;
+      case "QUEUED":
+        color = "#3f3f46";
+        emissive = "#71717a";
+        emissiveIntensity = 0.1;
+        break;
+      case "RUNNING":
+        color = "#8b5cf6";
+        emissive = "#8b5cf6";
+        emissiveIntensity = 0.35;
+        break;
+      case "COMPLETED":
+        color = "#10b981";
+        emissive = "#10b981";
+        emissiveIntensity = 0.15;
+        break;
+      case "FAILED":
+        color = "#ef4444";
+        emissive = "#ef4444";
+        emissiveIntensity = 0.25;
+        break;
+      case "BLOCKED":
+        color = "#f59e0b";
+        emissive = "#f59e0b";
+        emissiveIntensity = 0.2;
+        break;
+    }
+
+    if (isSelected) {
+      emissiveIntensity = Math.max(emissiveIntensity, 0.5);
+      opacity = 1;
+    }
+
+    return { color, emissive, emissiveIntensity, opacity };
+  }, [status, isSelected]);
 
   return (
-    <group position={position}>
+    <group position={position} ref={groupRef}>
       <mesh
-        onPointerOver={(e) => {
+        ref={meshRef}
+        onClick={(e) => {
           e.stopPropagation();
-          setHovered(true);
+          onSelect?.();
+        }}
+        onPointerOver={() => {
           document.body.style.cursor = "pointer";
         }}
         onPointerOut={() => {
-          setHovered(false);
-          document.body.style.cursor = "default";
+          document.body.style.cursor = "auto";
         }}
-        scale={hovered ? 1.1 : 1}
       >
-        <boxGeometry args={[0.5, 0.15, 0.5]} />
+        <boxGeometry args={[0.6, 0.22, 0.32]} />
         <meshStandardMaterial
-          color={getColor()}
-          emissive={getColor()}
-          emissiveIntensity={status === "running" ? 0.6 : 0.2}
-          metalness={0.1}
-          roughness={0.4}
+          color={visuals.color}
+          emissive={visuals.emissive}
+          emissiveIntensity={visuals.emissiveIntensity}
+          transparent
+          opacity={visuals.opacity}
+          roughness={0.5}
+          metalness={0.2}
         />
       </mesh>
 
-      {/* Layer indicator - small pillar height = layer */}
-      <mesh position={[0, layer * 0.1, 0]}>
-        <cylinderGeometry args={[0.02, 0.02, layer * 0.2, 8]} />
-        <meshStandardMaterial color="#3f3f46" />
+      {/* Layer indicator small */}
+      <mesh position={[0, 0.2, 0]}>
+        <sphereGeometry args={[0.04, 8, 8]} />
+        <meshStandardMaterial color="#52525b" transparent opacity={0.5} />
       </mesh>
 
-      {hovered && (
-        <Html distanceFactor={10} position={[0, 0.5, 0]} center>
-          <div className="px-2 py-1 rounded-lg bg-zinc-900/90 backdrop-blur border border-zinc-800 text-[11px] text-zinc-200 whitespace-nowrap pointer-events-none">
-            <div className="font-medium">{title}</div>
-            <div className="text-[10px] text-zinc-500">
-              {id} • layer {layer} • {status}
-            </div>
-          </div>
-        </Html>
+      {/* Title label - concise, clickable */}
+      <Text
+        position={[0, -0.35, 0]}
+        fontSize={0.18}
+        color={isSelected ? "#ffffff" : "#a1a1aa"}
+        anchorX="center"
+        anchorY="middle"
+        maxWidth={2}
+        lineHeight={1}
+        font="/fonts/GeistMono-Regular.woff"
+        // fallback if font missing
+      >
+        {title}
+      </Text>
+
+      {/* Status dot */}
+      <mesh position={[0.32, 0, 0]}>
+        <sphereGeometry args={[0.04, 8, 8]} />
+        <meshStandardMaterial color={visuals.emissive} emissive={visuals.emissive} emissiveIntensity={0.8} />
+      </mesh>
+
+      {isSelected && (
+        <mesh position={[0, 0, 0]}>
+          <boxGeometry args={[0.66, 0.28, 0.38]} />
+          <meshBasicMaterial color="#ffffff" wireframe transparent opacity={0.15} />
+        </mesh>
       )}
     </group>
   );

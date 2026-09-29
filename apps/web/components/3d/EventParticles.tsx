@@ -4,78 +4,82 @@ import { useRef, useMemo } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 
+interface Positioned {
+  id: string;
+  position: [number, number, number];
+}
+
 interface EventParticlesProps {
-  agents: Array<{ id: string; position: [number, number, number]; status: string }>;
+  agents: Positioned[];
 }
 
 export function EventParticles({ agents }: EventParticlesProps) {
   const pointsRef = useRef<THREE.Points>(null);
 
-  const particles = useMemo(() => {
-    // Create 30 particles for tool activity visualization - runtime only
+  // Stable seed - only recompute when agent count or ids change, not positions per-frame
+  // This keeps geometry/data stable while only runtime positions update in useFrame
+  const agentIdsKey = useMemo(() => agents.map((a) => a.id).join(","), [agents]);
+
+  const { positions, colors } = useMemo(() => {
     const count = 30;
-    const positions = new Float32Array(count * 3);
-    const colors = new Float32Array(count * 3);
+    const pos = new Float32Array(count * 3);
+    const col = new Float32Array(count * 3);
 
     for (let i = 0; i < count; i++) {
-      // Random around agents
       const agent = agents[i % agents.length];
       if (agent) {
-        positions[i * 3] = agent.position[0] + (Math.random() - 0.5) * 2;
-        positions[i * 3 + 1] = agent.position[1] + Math.random() * 2;
-        positions[i * 3 + 2] = agent.position[2] + (Math.random() - 0.5) * 2;
+        pos[i * 3] = agent.position[0] + (Math.random() - 0.5) * 0.5;
+        pos[i * 3 + 1] = agent.position[1] + Math.random() * 1.5;
+        pos[i * 3 + 2] = agent.position[2] + (Math.random() - 0.5) * 0.5;
+      } else {
+        pos[i * 3] = (Math.random() - 0.5) * 6;
+        pos[i * 3 + 1] = Math.random() * 2;
+        pos[i * 3 + 2] = (Math.random() - 0.5) * 6;
+      }
 
-        // Color based on tool activity
-        const isActive = agent.status === "tool_calling" || agent.status === "running";
-        if (isActive) {
-          colors[i * 3] = 0.5; // R
-          colors[i * 3 + 1] = 0.4; // G - violet
-          colors[i * 3 + 2] = 1.0; // B
-        } else {
-          colors[i * 3] = 0.3;
-          colors[i * 3 + 1] = 0.3;
-          colors[i * 3 + 2] = 0.3;
-        }
+      const type = i % 4;
+      if (type === 0) {
+        col[i * 3] = 0.55;
+        col[i * 3 + 1] = 0.36;
+        col[i * 3 + 2] = 0.96;
+      } else if (type === 1) {
+        col[i * 3] = 0.02;
+        col[i * 3 + 1] = 0.71;
+        col[i * 3 + 2] = 0.83;
+      } else if (type === 2) {
+        col[i * 3] = 0.96;
+        col[i * 3 + 1] = 0.62;
+        col[i * 3 + 2] = 0.04;
+      } else {
+        col[i * 3] = 0.06;
+        col[i * 3 + 1] = 0.72;
+        col[i * 3 + 2] = 0.51;
       }
     }
 
-    return { positions, colors, count };
-  }, [agents]);
+    return { positions: pos, colors: col };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentIdsKey, agents.length]);
 
-  useFrame((state, delta) => {
-    if (pointsRef.current) {
-      const positions = pointsRef.current.geometry.attributes.position.array as Float32Array;
-      // Simple upward drift for tool activity
-      for (let i = 0; i < particles.count; i++) {
-        positions[i * 3 + 1] += delta * 0.5;
-        if (positions[i * 3 + 1] > 5) {
-          positions[i * 3 + 1] = 0;
-        }
+  useFrame((_, delta) => {
+    if (!pointsRef.current) return;
+    const posAttr = pointsRef.current.geometry.attributes.position as THREE.BufferAttribute;
+    for (let i = 0; i < posAttr.count; i++) {
+      posAttr.setY(i, posAttr.getY(i) + delta * 0.15);
+      if (posAttr.getY(i) > 3) {
+        posAttr.setY(i, -0.5);
       }
-      pointsRef.current.geometry.attributes.position.needsUpdate = true;
-      pointsRef.current.rotation.y += delta * 0.05;
     }
+    posAttr.needsUpdate = true;
   });
 
   return (
     <points ref={pointsRef}>
       <bufferGeometry>
-        <bufferAttribute
-          attach="attributes-position"
-          count={particles.count}
-          array={particles.positions}
-          itemSize={3}
-          args={[particles.positions, 3]}
-        />
-        <bufferAttribute
-          attach="attributes-color"
-          count={particles.count}
-          array={particles.colors}
-          itemSize={3}
-          args={[particles.colors, 3]}
-        />
+        <bufferAttribute attach="attributes-position" args={[positions, 3]} />
+        <bufferAttribute attach="attributes-color" args={[colors, 3]} />
       </bufferGeometry>
-      <pointsMaterial size={0.08} vertexColors transparent opacity={0.6} sizeAttenuation />
+      <pointsMaterial size={0.06} vertexColors transparent opacity={0.5} sizeAttenuation />
     </points>
   );
 }
