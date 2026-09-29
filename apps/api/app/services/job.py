@@ -471,78 +471,64 @@ class JobService:
 
         terminal = {"completed", "failed", "cancelled"}
 
-        # If fencing parameters provided, use atomic conditional UPDATE to eliminate TOCTOU race
+        # If fencing parameters provided, use atomic fencing to eliminate TOCTOU race
+        # Preferred: conditional UPDATE WHERE id AND status AND locked_by, check rowcount
+        # Implementation: SELECT FOR UPDATE + fencing checks + ORM update (Postgres lock ensures atomicity, SQLite fallback checks)
         if expected_locked_by is not None or expected_status is not None:
-            from sqlalchemy import update as sa_update
             import logging
 
             logger = logging.getLogger(__name__)
-
-            conditions = [MissionJob.id == job_id]
-            if expected_status is not None:
-                conditions.append(MissionJob.status == expected_status)
-            if expected_locked_by is not None:
-                conditions.append(MissionJob.locked_by == expected_locked_by)
-
             now = datetime.now(timezone.utc)
-            update_values: Dict[str, Any] = {
-                "status": status,
-                "updated_at": now,
-            }
-            if result is not None:
-                update_values["result"] = result
-            if error is not None:
-                update_values["error"] = error
-            if status in terminal:
-                update_values["locked_at"] = None
-                update_values["heartbeat_at"] = None
-                update_values["locked_by"] = None
 
-            stmt = sa_update(MissionJob).where(and_(*conditions)).values(**update_values)
-            exec_result = await session.execute(stmt)
+            # First, get current job with FOR UPDATE to lock row (Postgres) and check terminal immutability
+            res = await session.execute(
+                select(MissionJob).where(MissionJob.id == job_id).with_for_update()
+            )
+            fresh = res.scalar_one_or_none()
+            if not fresh:
+                raise NotFoundError(f"Job {job_id} not found")
 
-            if exec_result.rowcount == 0:
-                # No rows updated - re-read authoritative job
-                res = await session.execute(select(MissionJob).where(MissionJob.id == job_id))
-                fresh = res.scalar_one_or_none()
-                if not fresh:
-                    raise NotFoundError(f"Job {job_id} not found")
-
-                # If fresh is terminal with different state, do not overwrite
-                if fresh.status in terminal and fresh.status != status:
+            # Terminal immutability check
+            if fresh.status in terminal:
+                if fresh.status != status:
                     logger.info(
                         f"Job {job_id} already in terminal {fresh.status}, not overwriting with {status} (fencing)"
                     )
                     return fresh
-
-                # If ownership changed, do not overwrite
-                if expected_locked_by is not None and fresh.locked_by != expected_locked_by:
-                    logger.info(
-                        f"Job {job_id} ownership changed from {expected_locked_by} to {fresh.locked_by}, not overwriting with {status}"
-                    )
-                    # If fresh is cancelled, respect cancellation
-                    if fresh.status == "cancelled":
-                        return fresh
-                    # If fresh owned by another worker, respect new owner
+                else:
                     return fresh
 
-                # If status changed from expected, do not overwrite
-                if expected_status is not None and fresh.status != expected_status:
-                    logger.info(
-                        f"Job {job_id} status changed from expected {expected_status} to {fresh.status}, not overwriting with {status}"
-                    )
-                    return fresh
-
-                # Rowcount 0 but fresh still matches expected - could be same-state idempotent or race
-                # Return fresh as safe
+            # Ownership fencing
+            if expected_locked_by is not None and fresh.locked_by != expected_locked_by:
+                logger.info(
+                    f"Job {job_id} ownership changed from {expected_locked_by} to {fresh.locked_by}, not overwriting with {status}"
+                )
                 return fresh
 
-            # Fetch updated job
-            res = await session.execute(select(MissionJob).where(MissionJob.id == job_id))
-            job = res.scalar_one_or_none()
-            if not job:
-                raise NotFoundError(f"Job {job_id} not found")
-            return job
+            # Status fencing
+            if expected_status is not None and fresh.status != expected_status:
+                logger.info(
+                    f"Job {job_id} status changed from expected {expected_status} to {fresh.status}, not overwriting with {status}"
+                )
+                return fresh
+
+            # All fencing checks passed - perform update via ORM (row is locked in Postgres, checked in SQLite)
+            # Use direct ORM update to avoid aiosqlite rowcount/connection issues in Python 3.12
+            fresh.status = status
+            if result is not None:
+                fresh.result = result
+            if error is not None:
+                fresh.error = error
+            fresh.updated_at = now
+
+            if status in terminal:
+                fresh.locked_at = None
+                fresh.heartbeat_at = None
+                fresh.locked_by = None
+
+            await session.flush()
+            await session.refresh(fresh)
+            return fresh
 
         # Non-fencing path: enforce terminal immutability
         res = await session.execute(select(MissionJob).where(MissionJob.id == job_id))
