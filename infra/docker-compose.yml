@@ -86,6 +86,42 @@ services:
       retries: 3
       start_period: 20s
 
+  worker:
+    build:
+      context: ../apps/api
+      dockerfile: Dockerfile
+    container_name: nexus-worker
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker_main"]
+    environment:
+      ENV: ${ENV:-development}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-nexus}:${POSTGRES_PASSWORD:-nexus}@postgres:5432/${POSTGRES_DB:-nexus}
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-change-me}
+      NEXUS_DEV_TOKEN: ${NEXUS_DEV_TOKEN:-dev-token-change-me}
+      WORKER_ID: ${WORKER_ID:-worker-1}
+      WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-2.0}
+      WORKER_LEASE_TIMEOUT: ${WORKER_LEASE_TIMEOUT:-60}
+      WORKER_HEARTBEAT_INTERVAL: ${WORKER_HEARTBEAT_INTERVAL:-20}
+      MODEL_DEFAULT_PROVIDER: ${MODEL_DEFAULT_PROVIDER:-openai-compatible}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
+      SANDBOX_SERVICE_TYPE: ${SANDBOX_SERVICE_TYPE:-placeholder}
+      AUTH_MODE: ${AUTH_MODE:-bearer_token}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../apps/api:/app
+      - /app/__pycache__
+      - nexus_workspaces:/tmp/nexus-workspaces
+    networks:
+      - nexus-network
+    # Security: no Docker socket, no privileged, no extra caps
+    # Separate process from API, API != Worker
+
   web:
     build:
       context: ../apps/web

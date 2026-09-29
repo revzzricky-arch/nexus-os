@@ -16,6 +16,8 @@ POST /api/v1/missions/{id}/start → JobService → mission_jobs table → Worke
 - API returns 202 immediately with `mission_id`, `execution_id`, `job_id`
 - No long-running work in request
 - Worker is separate async process, not FastAPI background task
+- **API process != Worker process**: API handles HTTP, validation, job creation (202). Worker is dedicated process consuming `mission_jobs` via `FOR UPDATE SKIP LOCKED`.
+- **Docker Compose**: starts both `api` and `worker` services separately using same image/build context. `api` runs `uvicorn app.main:app`, `worker` runs `python -m app.worker_main`. Both depend on postgres+redis healthy, share DATABASE_URL/REDIS_URL, have distinct `worker_id`, restart `unless-stopped`, no Docker socket, no privileged mode.
 
 ### mission_jobs Table
 Fields:
@@ -84,6 +86,25 @@ Lease/heartbeat:
 - Methods: `execute_job(session, job_id)` invokes orchestrator isolated method, handles success/failure/retry bounded, emits events; `_heartbeat_loop` periodic renew; `run_once(session)` claim+execute; `run_forever(session_factory)` loop with startup stale recovery
 - `worker_id` unique per process (uuid suffix)
 - Multi-worker future: each worker has unique ID, all poll same table with FOR UPDATE SKIP LOCKED, only one claims atomically, can run on different hosts same DB, lease/heartbeat prevents duplicate, future replacement with LISTEN/NOTIFY or Redis Streams for lower latency
+
+### Dedicated Worker Process (Docker Compose Gap Fix)
+- **Problem**: Repository had `MissionWorker.run_forever()` but `Dockerfile` only started `uvicorn`, `docker-compose.yml` had no worker service, so `docker compose up` would create durable jobs but never consume them.
+- **Fix**:
+  - Added `apps/api/app/worker_main.py` entrypoint:
+    - Imports `AsyncSessionLocal` from `app.db.session` and `MissionWorker` from `app.worker`
+    - Reads `WORKER_ID`, `WORKER_POLL_INTERVAL`, `WORKER_LEASE_TIMEOUT`, `WORKER_HEARTBEAT_INTERVAL` from env
+    - Instantiates `MissionWorker(worker_id, poll_interval, lease_timeout, heartbeat_interval, session_factory=AsyncSessionLocal)`
+    - Calls `await worker.run_forever(AsyncSessionLocal)`
+    - Handles graceful shutdown via `SIGTERM`/`SIGINT` using `loop.add_signal_handler` + `asyncio.Event`, stops worker, waits 30s for current job, cancels if timeout
+    - Never imports/starts FastAPI, never uses FastAPI background task
+  - Added `worker` service to `infra/docker-compose.yml`:
+    - Same build context `../apps/api` as `api`
+    - `command: ["python", "-m", "app.worker_main"]`
+    - `depends_on: postgres healthy, redis healthy`
+    - Same `DATABASE_URL`/`REDIS_URL` as API, plus `WORKER_ID` etc.
+    - `restart: unless-stopped`, separate container, own `worker_id`
+    - No Docker socket, no privileged, no extra caps
+  - API behavior unchanged: `POST /missions/{id}/start` remains 202 only creates job, does NOT run worker internally.
 
 ### Orchestrator Integration
 - Existing LangGraph reused, no redesign of graph nodes
