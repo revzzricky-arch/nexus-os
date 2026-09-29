@@ -8,11 +8,19 @@ import pathlib
 
 
 def test_shared_events_ws_contract_matches_backend():
-    # Load shared events.ts
-    shared_path = pathlib.Path(__file__).parent.parent.parent / "packages" / "shared" / "src" / "events.ts"
-    # Try alternative path if not found (workspace root)
+    # Load shared events.ts - repo root is 3 levels up from apps/api/tests/
+    repo_root = pathlib.Path(__file__).resolve().parents[3]
+    shared_path = repo_root / "packages" / "shared" / "src" / "events.ts"
     if not shared_path.exists():
-        shared_path = pathlib.Path("/home/user/nexus-os/packages/shared/src/events.ts")
+        # Fallback for different working dirs
+        shared_path = pathlib.Path(__file__).resolve().parent.parent.parent.parent / "packages" / "shared" / "src" / "events.ts"
+    if not shared_path.exists():
+        shared_path = pathlib.Path.cwd().resolve().parent.parent / "packages" / "shared" / "src" / "events.ts"
+    if not shared_path.exists():
+        shared_path = pathlib.Path.cwd().resolve() / ".." / ".." / "packages" / "shared" / "src" / "events.ts"
+        shared_path = shared_path.resolve()
+
+    assert shared_path.exists(), f"Shared events.ts not found, tried {shared_path}, repo_root {repo_root}"
 
     content = shared_path.read_text()
 
@@ -37,7 +45,9 @@ def test_shared_events_ws_contract_matches_backend():
     assert "WSClientSubscribe" in backend_content
 
     # Ensure frontend hook also matches
-    frontend_hook_path = pathlib.Path("/home/user/nexus-os/apps/web/lib/ws/useWebSocket.ts")
+    frontend_hook_path = repo_root / "apps" / "web" / "lib" / "ws" / "useWebSocket.ts"
+    if not frontend_hook_path.exists():
+        frontend_hook_path = pathlib.Path(__file__).resolve().parents[3] / "apps" / "web" / "lib" / "ws" / "useWebSocket.ts"
     if frontend_hook_path.exists():
         frontend_content = frontend_hook_path.read_text()
         assert "mission_id" in frontend_content
