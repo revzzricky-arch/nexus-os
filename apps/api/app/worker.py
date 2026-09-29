@@ -79,7 +79,8 @@ class MissionWorker:
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(job_id))
 
             try:
-                result = await orchestrator_service.start_mission(session, job.mission_id)
+                # PR 3.1 must use isolated entry point, not legacy start_mission
+                result = await orchestrator_service.execute_mission_isolated(session, job.mission_id)
 
                 if self._heartbeat_failed:
                     logger.warning(

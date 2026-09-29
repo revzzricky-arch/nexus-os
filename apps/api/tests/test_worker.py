@@ -59,7 +59,7 @@ async def test_worker_pending_execution_success(session_factory):
         await session.commit()
         job_id = job.id
 
-    with patch("app.services.orchestrator.orchestrator_service.start_mission", new_callable=AsyncMock) as mock_start:
+    with patch("app.services.orchestrator.orchestrator_service.execute_mission_isolated", new_callable=AsyncMock) as mock_start:
         mock_start.return_value = {"mission_id": str(mission.id), "status": "completed"}
 
         worker = MissionWorker(worker_id="test-worker-1", poll_interval=0.1, session_factory=session_factory)
@@ -89,7 +89,7 @@ async def test_worker_pending_execution_failure(session_factory):
         await session.commit()
         job_id = job.id
 
-    with patch("app.services.orchestrator.orchestrator_service.start_mission", new_callable=AsyncMock) as mock_start:
+    with patch("app.services.orchestrator.orchestrator_service.execute_mission_isolated", new_callable=AsyncMock) as mock_start:
         mock_start.side_effect = Exception("orchestrator failed")
 
         worker = MissionWorker(worker_id="test-worker-fail", poll_interval=0.1, session_factory=session_factory)
@@ -120,7 +120,7 @@ async def test_worker_retry_bounded(session_factory):
         await session.commit()
         job_id = job.id
 
-    with patch("app.services.orchestrator.orchestrator_service.start_mission", new_callable=AsyncMock) as mock_start:
+    with patch("app.services.orchestrator.orchestrator_service.execute_mission_isolated", new_callable=AsyncMock) as mock_start:
         mock_start.side_effect = Exception("always fail")
 
         worker = MissionWorker(worker_id="test-worker-retry", session_factory=session_factory)
@@ -160,7 +160,7 @@ async def test_worker_heartbeat_independent_session(session_factory):
         await session.commit()
         job_id = job.id
 
-    with patch("app.services.orchestrator.orchestrator_service.start_mission", new_callable=AsyncMock) as mock_start:
+    with patch("app.services.orchestrator.orchestrator_service.execute_mission_isolated", new_callable=AsyncMock) as mock_start:
         async def long_task(*args, **kwargs):
             await asyncio.sleep(0.35)
             return {"status": "completed"}
@@ -282,7 +282,7 @@ async def test_worker_cancellation(session_factory):
         await session.commit()
         assert cancelled.status == "cancelled"
 
-    with patch("app.services.orchestrator.orchestrator_service.start_mission", new_callable=AsyncMock) as mock_start:
+    with patch("app.services.orchestrator.orchestrator_service.execute_mission_isolated", new_callable=AsyncMock) as mock_start:
         mock_start.return_value = {"status": "completed"}
 
         worker = MissionWorker(worker_id="worker-cancel-test", session_factory=session_factory)
@@ -347,7 +347,7 @@ async def test_worker_run_once(session_factory):
         job = await job_service.create_job(session, mission_id=mission.id)
         await session.commit()
 
-    with patch("app.services.orchestrator.orchestrator_service.start_mission", new_callable=AsyncMock) as mock_start:
+    with patch("app.services.orchestrator.orchestrator_service.execute_mission_isolated", new_callable=AsyncMock) as mock_start:
         mock_start.return_value = {"status": "completed"}
 
         worker = MissionWorker(worker_id="test-worker-once", session_factory=session_factory)
@@ -361,6 +361,104 @@ async def test_worker_run_once(session_factory):
             job_id2 = await worker.run_once(session)
             await session.commit()
             assert job_id2 is None
+
+
+@pytest.mark.asyncio
+async def test_worker_uses_isolated_entry_point(session_factory):
+    """Worker must invoke execute_mission_isolated, not legacy start_mission"""
+    mission = await create_mission(session_factory)
+
+    async with session_factory() as session:
+        job = await job_service.create_job(session, mission_id=mission.id)
+        await session.commit()
+        job_id = job.id
+
+    with patch("app.services.orchestrator.orchestrator_service.execute_mission_isolated", new_callable=AsyncMock) as mock_isolated, \
+         patch("app.services.orchestrator.orchestrator_service.start_mission", new_callable=AsyncMock) as mock_legacy:
+
+        mock_isolated.return_value = {"mission_id": str(mission.id), "status": "completed"}
+        mock_legacy.return_value = {"mission_id": str(mission.id), "status": "completed"}
+
+        worker = MissionWorker(worker_id="test-worker-isolated", session_factory=session_factory)
+
+        async with session_factory() as session:
+            claimed = await job_service.claim_job(session, worker_id=worker.worker_id)
+            await session.commit()
+
+            result = await worker.execute_job(session, claimed.id)
+            await session.commit()
+
+            assert result is True
+            mock_isolated.assert_called_once()
+            mock_legacy.assert_not_called(), "Worker must NOT invoke legacy start_mission, must use execute_mission_isolated"
+
+
+@pytest.mark.asyncio
+async def test_paused_job_not_auto_requeued(session_factory):
+    """Regression: deliberately paused job must not be auto-requeued by stale recovery"""
+    mission = await create_mission(session_factory)
+
+    async with session_factory() as session:
+        job = await job_service.create_job(session, mission_id=mission.id)
+        await session.commit()
+
+        claimed = await job_service.claim_job(session, worker_id="worker-pause-test")
+        await session.commit()
+        job_id = claimed.id
+
+        # Simulate intentional pause
+        paused = await job_service.update_job_status(session, job_id, "paused")
+        await session.commit()
+        assert paused.status == "paused"
+
+        # Make heartbeat old - should NOT be requeued because paused is intentional
+        job = await session.get(MissionJob, job_id)
+        job.heartbeat_at = datetime.now(timezone.utc) - timedelta(seconds=LEASE_TIMEOUT_SECONDS + 100)
+        job.locked_at = datetime.now(timezone.utc) - timedelta(seconds=LEASE_TIMEOUT_SECONDS + 100)
+        # Keep locked_by to simulate paused with old heartbeat
+        await session.commit()
+
+    async with session_factory() as session:
+        recovered = await job_service.recover_stale_jobs(session, lease_timeout=LEASE_TIMEOUT_SECONDS)
+        await session.commit()
+        # Paused should remain paused
+        assert len(recovered) == 0, "Paused job must NOT be auto-requeued"
+
+        fresh = await job_service.get_job(session, job_id)
+        assert fresh.status == "paused", "Paused job must remain paused"
+
+
+@pytest.mark.asyncio
+async def test_awaiting_approval_not_treated_as_crashed(session_factory):
+    """awaiting_approval must NOT be treated as crashed running job (deferred to PR 3.2/3.6)"""
+    mission = await create_mission(session_factory)
+
+    async with session_factory() as session:
+        job = await job_service.create_job(session, mission_id=mission.id)
+        await session.commit()
+
+        claimed = await job_service.claim_job(session, worker_id="worker-approval-test")
+        await session.commit()
+        job_id = claimed.id
+
+        # Move to awaiting_approval
+        awaiting = await job_service.update_job_status(session, job_id, "awaiting_approval")
+        await session.commit()
+        assert awaiting.status == "awaiting_approval"
+
+        # Make heartbeat old
+        job = await session.get(MissionJob, job_id)
+        job.heartbeat_at = datetime.now(timezone.utc) - timedelta(seconds=LEASE_TIMEOUT_SECONDS + 100)
+        job.locked_at = datetime.now(timezone.utc) - timedelta(seconds=LEASE_TIMEOUT_SECONDS + 100)
+        await session.commit()
+
+    async with session_factory() as session:
+        recovered = await job_service.recover_stale_jobs(session, lease_timeout=LEASE_TIMEOUT_SECONDS)
+        await session.commit()
+        assert len(recovered) == 0, "awaiting_approval must NOT be reclaimed in PR 3.1"
+
+        fresh = await job_service.get_job(session, job_id)
+        assert fresh.status == "awaiting_approval"
 
 
 @pytest.mark.asyncio

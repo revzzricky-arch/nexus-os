@@ -47,6 +47,20 @@ Indexes:
 - Fallback: partial unique one active per mission ensures no duplicate concurrent executions without timestamp-based mechanism (preferred per spec)
 - Not timestamp-based, uses DB constraints + client key
 
+### Worker Entry Point Correction (Final PR #8)
+- Worker **must** call `orchestrator_service.execute_mission_isolated()` explicitly, not legacy `start_mission()`
+- `start_mission()` remains only as legacy/backward-compatible synchronous method delegating to `_execute_mission_core()`
+- `_execute_mission_core()` is shared implementation, no duplication
+- Test proves worker invokes isolated path and does not invoke legacy path
+
+### Paused-Job Recovery Rule (Final PR #8)
+Exact rule for PR 3.1:
+- Only `running` jobs with expired lease may recover (crashed worker)
+- `paused` jobs intentionally paused by user/system must remain paused unless explicit recovery reason – do NOT auto-convert paused to pending merely because heartbeat is old
+- `awaiting_approval` must NOT be treated as crashed running job in this PR because approval resume/checkpointing deferred to PR 3.2/3.6
+- Implementation: `recover_stale_jobs()` query filters `status IN ('running')` only, not paused, not awaiting_approval
+- Regression tests: paused job not auto-requeued, awaiting_approval not treated as crashed
+
 ### JobService Methods
 - `create_job(mission_id, idempotency_key, payload)`: validates payload size/secrets, checks idempotency lookup, checks active job exists → ConflictError, creates job with execution_id uuid4, handles IntegrityError race by fetching existing
 - `get_job(job_id)`, `get_job_by_execution(execution_id)`, `list_jobs(mission_id, status, limit, offset)`

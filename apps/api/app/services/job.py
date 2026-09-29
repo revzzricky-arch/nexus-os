@@ -573,12 +573,25 @@ class JobService:
         session: AsyncSession,
         lease_timeout: int = LEASE_TIMEOUT_SECONDS,
     ) -> List[MissionJob]:
+        """
+        Recover stale jobs whose lease expired.
+
+        Exact rule for PR 3.1:
+        - Only 'running' jobs with expired lease may recover (crashed worker)
+        - 'paused' jobs intentionally paused by user/system must remain paused unless explicit recovery reason
+          -> Do NOT auto-convert paused to pending merely because heartbeat is old
+        - 'awaiting_approval' must NOT be treated as crashed running job in this PR because approval resume/checkpointing
+          is deferred to PR 3.2/3.6
+        - Healthy long-running worker with recent heartbeat NOT reclaimed, crashed expired IS reclaimed
+
+        Preserves previous locked_by in error message.
+        """
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(seconds=lease_timeout)
 
         query = select(MissionJob).where(
             and_(
-                MissionJob.status.in_(("running", "paused")),
+                MissionJob.status.in_(("running",)),  # Only running, not paused, not awaiting_approval
                 or_(
                     and_(MissionJob.heartbeat_at.is_not(None), MissionJob.heartbeat_at < cutoff),
                     and_(MissionJob.heartbeat_at.is_(None), MissionJob.locked_at.is_not(None), MissionJob.locked_at < cutoff),
