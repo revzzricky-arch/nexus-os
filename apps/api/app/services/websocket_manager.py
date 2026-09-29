@@ -5,7 +5,7 @@ Responsibilities:
 - Connection registration
 - Auth state tracking
 - Mission subscriptions
-- broadcast_event
+- broadcast_event with gap-safe replay buffering
 - disconnect / cleanup
 - Bounded tracking
 
@@ -19,6 +19,15 @@ Limits (MVP documented):
 - AUTH_TIMEOUT_SECONDS = 10
 - MAX_REPLAY_BATCH = 100
 - HEARTBEAT_INTERVAL = 30s (client ping, server pong)
+- REPLAY_BUFFER_MAX = 200 (buffer live events during replay phase)
+
+Gap-safe replay/live handoff:
+- Subscription is established BEFORE replay query
+- Live events arriving during replay query are buffered per-connection per-mission
+- Replay sends historical events up to subscription point
+- Buffered live events are then drained in deterministic order, deduplicated against replayed IDs
+- After buffer drain, live delivery resumes directly
+- Prevents race where event emitted between replay query and subscription is lost
 """
 
 import asyncio
@@ -40,6 +49,7 @@ MAX_MESSAGE_SIZE_BYTES = 32 * 1024  # 32KB
 AUTH_TIMEOUT_SECONDS = 10
 MAX_REPLAY_BATCH = 100
 HEARTBEAT_INTERVAL_SECONDS = 30
+REPLAY_BUFFER_MAX = 200
 
 
 class WSConnectionState(str, Enum):
@@ -62,6 +72,9 @@ class WSConnection:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     # For bounded tracking, count messages
     message_count: int = 0
+    # Gap-safe replay buffering
+    replay_buffers: Dict[uuid.UUID, List[Any]] = field(default_factory=dict)
+    replay_in_progress: Set[uuid.UUID] = field(default_factory=set)
 
     def is_authenticated(self) -> bool:
         return self.state in (WSConnectionState.AUTHENTICATED, WSConnectionState.SUBSCRIBED) and self.authenticated_user_id is not None
@@ -72,6 +85,7 @@ class WebSocketManager:
     In-process WebSocket manager
     Redis NOT required - Postgres is source of truth, in-process subs acceptable
     Optionally future Redis adapter can be isolated behind this boundary
+    Implements gap-safe replay/live handoff via per-connection buffering
     """
 
     def __init__(self):
@@ -147,6 +161,8 @@ class WebSocketManager:
             if conn:
                 conn.subscriptions.discard(mission_id)
                 conn.last_event_ids.pop(mission_id, None)
+                conn.replay_buffers.pop(mission_id, None)
+                conn.replay_in_progress.discard(mission_id)
                 if not conn.subscriptions and conn.state == WSConnectionState.SUBSCRIBED:
                     conn.state = WSConnectionState.AUTHENTICATED
 
@@ -189,15 +205,50 @@ class WebSocketManager:
                     conns.append(c)
             return conns
 
+    # --- Gap-safe replay buffering ---
+
+    async def start_replay_buffer(self, conn_id: str, mission_id: uuid.UUID):
+        """
+        Start buffering live events for this connection+mission during replay phase
+        Must be called AFTER add_subscription and BEFORE replay query
+        """
+        async with self._lock:
+            conn = self._connections.get(conn_id)
+            if not conn:
+                return
+            conn.replay_in_progress.add(mission_id)
+            if mission_id not in conn.replay_buffers:
+                conn.replay_buffers[mission_id] = []
+
+    async def end_replay_buffer(self, conn_id: str, mission_id: uuid.UUID) -> List[Any]:
+        """
+        End buffering and return buffered events
+        Future live events will be sent directly
+        Returns list of buffered events in arrival order
+        """
+        async with self._lock:
+            conn = self._connections.get(conn_id)
+            if not conn:
+                return []
+            buffered = conn.replay_buffers.pop(mission_id, [])
+            conn.replay_in_progress.discard(mission_id)
+            return buffered
+
+    async def get_buffered_count(self, conn_id: str, mission_id: uuid.UUID) -> int:
+        async with self._lock:
+            conn = self._connections.get(conn_id)
+            if not conn:
+                return 0
+            return len(conn.replay_buffers.get(mission_id, []))
+
     async def broadcast_event(self, event: Any):
         """
         Broadcast EventEnvelope to all subscribed connections for event.mission_id
-        Event must have mission_id attribute
+        Handles gap-safe buffering: if replay_in_progress for conn+mission, buffer instead of direct send
         Handles disconnected clients gracefully, no crash
         """
         mission_id = getattr(event, "mission_id", None)
         if mission_id is None:
-            # Try dict access
             if isinstance(event, dict):
                 mid = event.get("mission_id")
                 if mid:
@@ -214,7 +265,7 @@ class WebSocketManager:
             except Exception:
                 return
 
-        # Get subscribers snapshot outside lock for sending? Use method that copies
+        # Get subscribers snapshot
         conns = await self.get_connections_for_mission(mission_id)
 
         if not conns:
@@ -223,11 +274,32 @@ class WebSocketManager:
         # Serialize event once
         envelope = self._serialize_event(event)
 
-        # Send to each, handle disconnected gracefully
+        # Send to each, with buffering check
         for conn in conns:
             try:
-                # Update last_event_id tracking for this mission
-                # We do this outside lock for performance, but we should update tracking
+                # Check if replay in progress for this conn+mission - buffer instead of direct send
+                should_buffer = False
+                async with self._lock:
+                    tracked = self._connections.get(conn.id)
+                    if tracked and mission_id in tracked.replay_in_progress:
+                        # Buffer live event during replay phase
+                        buf = tracked.replay_buffers.get(mission_id)
+                        if buf is None:
+                            tracked.replay_buffers[mission_id] = []
+                            buf = tracked.replay_buffers[mission_id]
+                        # Bounded buffer
+                        if len(buf) < REPLAY_BUFFER_MAX:
+                            buf.append(event)
+                        else:
+                            # Drop oldest if overflow to keep bounded
+                            buf.pop(0)
+                            buf.append(event)
+                        should_buffer = True
+
+                if should_buffer:
+                    continue
+
+                # Normal live delivery - update last_event_id tracking and send
                 async with self._lock:
                     tracked = self._connections.get(conn.id)
                     if tracked:
@@ -243,9 +315,7 @@ class WebSocketManager:
 
                 await conn.websocket.send_text(json.dumps(envelope))
             except Exception as e:
-                # Disconnected client or send failure - log and continue, do not crash
                 logger.debug(f"WS broadcast failed for {conn.id}: {e}")
-                # Schedule disconnect cleanup? Keep it, router will handle disconnect
                 continue
 
     def _serialize_event(self, event: Any) -> Dict[str, Any]:
@@ -256,7 +326,6 @@ class WebSocketManager:
         if isinstance(event, dict):
             return event
 
-        # Event model
         try:
             return {
                 "id": str(event.id),
@@ -271,7 +340,6 @@ class WebSocketManager:
                 "metadata": getattr(event, "metadata_", None) or getattr(event, "metadata", None),
             }
         except Exception:
-            # Fallback
             return {
                 "id": str(getattr(event, "id", uuid.uuid4())),
                 "type": str(getattr(event, "type", "unknown")),
@@ -284,17 +352,11 @@ class WebSocketManager:
             return len(self._connections)
 
     async def cleanup(self):
-        """
-        Cleanup all connections - for shutdown
-        """
         async with self._lock:
             self._connections.clear()
             self._mission_subscribers.clear()
 
     def constant_time_compare(self, a: str, b: str) -> bool:
-        """
-        Constant-time token compare, no token logging
-        """
         try:
             return hmac.compare_digest(a, b)
         except Exception:

@@ -1,7 +1,7 @@
 """
-WebSocket Replay Tests - Phase 2B-5
+WebSocket Replay Tests - Phase 2B-5 Hardened
 
-Tests replay order, wrong-mission, no leak, boundary deduplication
+Tests replay order, wrong-mission, no leak, boundary deduplication, gap-safe race
 """
 
 import uuid
@@ -69,7 +69,6 @@ def _auth(ws):
 
 
 def test_replay_order_deterministic(client: TestClient):
-    # Create mission
     resp = client.post(
         "/api/v1/missions/",
         json={"title": "Replay Order", "goal": "g"},
@@ -78,7 +77,6 @@ def test_replay_order_deterministic(client: TestClient):
     assert resp.status_code == 201
     mission_id = resp.json()["id"]
 
-    # Create some transitions to generate events
     client.patch(
         f"/api/v1/missions/{mission_id}",
         json={"status": "decomposing"},
@@ -90,7 +88,6 @@ def test_replay_order_deterministic(client: TestClient):
         headers={"Authorization": f"Bearer {TEST_TOKEN}"},
     )
 
-    # List events to get order
     resp = client.get(
         f"/api/v1/missions/{mission_id}/events",
         headers={"Authorization": f"Bearer {TEST_TOKEN}"},
@@ -98,11 +95,9 @@ def test_replay_order_deterministic(client: TestClient):
     assert resp.status_code == 200
     events = resp.json()["data"]
     assert len(events) >= 3
-    # Check deterministic ordering: timestamp ASC
     timestamps = [e["timestamp"] for e in events]
     assert timestamps == sorted(timestamps)
 
-    # Now subscribe via WS and check replay order matches
     with client.websocket_connect("/api/v1/ws") as ws:
         _auth(ws)
         ws.send_text(json.dumps({"type": "subscribe", "mission_id": mission_id}))
@@ -117,7 +112,6 @@ def test_replay_order_deterministic(client: TestClient):
             env = json.loads(data)
             replayed.append(env)
 
-        # Check order matches DB order
         replay_ids = [e["id"] for e in replayed]
         db_ids = [e["id"] for e in events[:replay_count]]
         assert replay_ids == db_ids
@@ -131,14 +125,12 @@ def test_replay_with_last_event_id(client: TestClient):
     )
     mission_id = resp.json()["id"]
 
-    # Get first event id
     resp = client.get(
         f"/api/v1/missions/{mission_id}/events",
         headers={"Authorization": f"Bearer {TEST_TOKEN}"},
     )
     first_event_id = resp.json()["data"][0]["id"]
 
-    # Create more events
     client.patch(
         f"/api/v1/missions/{mission_id}",
         json={"status": "decomposing"},
@@ -152,7 +144,6 @@ def test_replay_with_last_event_id(client: TestClient):
         )
         sub_resp = json.loads(ws.receive_text())
         assert sub_resp["type"] == "subscribed"
-        # Should not include first event
         for _ in range(sub_resp["replay_count"]):
             data = ws.receive_text()
             env = json.loads(data)
@@ -160,7 +151,6 @@ def test_replay_with_last_event_id(client: TestClient):
 
 
 def test_replay_wrong_mission_last_event_id(client: TestClient):
-    # Create 2 missions
     resp1 = client.post(
         "/api/v1/missions/",
         json={"title": "M1", "goal": "g"},
@@ -174,14 +164,12 @@ def test_replay_wrong_mission_last_event_id(client: TestClient):
     m1_id = resp1.json()["id"]
     m2_id = resp2.json()["id"]
 
-    # Get event from m1
     resp = client.get(
         f"/api/v1/missions/{m1_id}/events",
         headers={"Authorization": f"Bearer {TEST_TOKEN}"},
     )
     m1_event_id = resp.json()["data"][0]["id"]
 
-    # Try to subscribe to m2 with m1's last_event_id -> should error last_event_wrong_mission
     with client.websocket_connect("/api/v1/ws") as ws:
         _auth(ws)
         ws.send_text(
@@ -193,7 +181,6 @@ def test_replay_wrong_mission_last_event_id(client: TestClient):
 
 
 def test_no_cross_mission_leak(client: TestClient):
-    # Create 2 missions with events
     resp1 = client.post(
         "/api/v1/missions/",
         json={"title": "Leak M1", "goal": "g"},
@@ -207,7 +194,6 @@ def test_no_cross_mission_leak(client: TestClient):
     m1_id = resp1.json()["id"]
     m2_id = resp2.json()["id"]
 
-    # Create extra event for m1
     client.patch(
         f"/api/v1/missions/{m1_id}",
         json={"status": "decomposing"},
@@ -216,12 +202,10 @@ def test_no_cross_mission_leak(client: TestClient):
 
     with client.websocket_connect("/api/v1/ws") as ws:
         _auth(ws)
-        # Subscribe only to m2
         ws.send_text(json.dumps({"type": "subscribe", "mission_id": m2_id}))
         sub_resp = json.loads(ws.receive_text())
         assert sub_resp["type"] == "subscribed"
 
-        # Replay should only contain m2 events
         for _ in range(sub_resp["replay_count"]):
             data = ws.receive_text()
             env = json.loads(data)
@@ -230,7 +214,6 @@ def test_no_cross_mission_leak(client: TestClient):
 
 
 def test_replay_boundary_no_duplicate(client: TestClient):
-    # Test that replay + live doesn't duplicate at boundary
     resp = client.post(
         "/api/v1/missions/",
         json={"title": "Boundary Test", "goal": "g"},
@@ -238,7 +221,6 @@ def test_replay_boundary_no_duplicate(client: TestClient):
     )
     mission_id = resp.json()["id"]
 
-    # Get all events
     resp = client.get(
         f"/api/v1/missions/{mission_id}/events",
         headers={"Authorization": f"Bearer {TEST_TOKEN}"},
@@ -248,7 +230,6 @@ def test_replay_boundary_no_duplicate(client: TestClient):
 
     with client.websocket_connect("/api/v1/ws") as ws:
         _auth(ws)
-        # Subscribe with last_event_id = last event, should get 0 replay
         ws.send_text(
             json.dumps({"type": "subscribe", "mission_id": mission_id, "last_event_id": last_id})
         )
@@ -256,19 +237,8 @@ def test_replay_boundary_no_duplicate(client: TestClient):
         assert sub_resp["type"] == "subscribed"
         assert sub_resp["replay_count"] == 0
 
-        # Now create new event after subscription - should be delivered live once
-        # Use another client to create transition
-        # We need to use same DB? Our client fixture uses same in-memory DB for duration
-        # So we can trigger via REST
-        # But live broadcast via websocket_manager requires event_bus emit which happens on patch
-        # Our WS manager should receive broadcast via event_bus -> broadcast_event
-        # However TestClient's event_bus emit uses asyncio.create_task, which may need loop
-        # For MVP, we test that no duplicate replay occurs at boundary, not live delivery in same test
-        # Live delivery is tested in events test
-
 
 def test_replay_batch_bounded(client: TestClient):
-    # Create mission and many events (simulate by patching multiple times, but limited)
     resp = client.post(
         "/api/v1/missions/",
         json={"title": "Batch Test", "goal": "g"},
@@ -276,7 +246,6 @@ def test_replay_batch_bounded(client: TestClient):
     )
     mission_id = resp.json()["id"]
 
-    # Create few events
     client.patch(
         f"/api/v1/missions/{mission_id}",
         json={"status": "decomposing"},
@@ -297,6 +266,135 @@ def test_replay_batch_bounded(client: TestClient):
         _auth(ws)
         ws.send_text(json.dumps({"type": "subscribe", "mission_id": mission_id}))
         sub_resp = json.loads(ws.receive_text())
-        # replay_count should be bounded by MAX_REPLAY_BATCH (100)
         assert sub_resp["replay_count"] <= 100
         assert sub_resp["type"] == "subscribed"
+
+
+def test_replay_live_race_gap_safe():
+    """
+    Regression test for replay/live race condition
+    Simulates event appearing around replay/subscription boundary
+    Proves it is not silently lost or duplicated with gap-safe buffering
+    """
+    async def run():
+        await websocket_manager.cleanup()
+        from unittest.mock import AsyncMock
+        import datetime
+
+        mock_ws = AsyncMock()
+        mock_ws.send_text = AsyncMock()
+
+        conn = await websocket_manager.register(mock_ws)
+        assert conn is not None
+        user_id = uuid.uuid4()
+        await websocket_manager.set_authenticated(conn.id, user_id)
+        mission_id = uuid.uuid4()
+
+        added = await websocket_manager.add_subscription(conn.id, mission_id)
+        assert added
+
+        await websocket_manager.start_replay_buffer(conn.id, mission_id)
+
+        class FakeEvent:
+            def __init__(self, eid, ts):
+                self.id = eid
+                self.type = "mission_status_changed"
+                self.source = "system"
+                self.mission_id = mission_id
+                self.task_id = None
+                self.agent_id = None
+                self.timestamp = ts
+                self.version = 1
+                self.payload = {"from": "draft", "to": "running"}
+                self.metadata_ = {}
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        replay_events = [
+            FakeEvent(uuid.uuid4(), now),
+            FakeEvent(uuid.uuid4(), now),
+        ]
+        replayed_ids = {e.id for e in replay_events}
+
+        race_event = FakeEvent(uuid.uuid4(), now)
+        await websocket_manager.broadcast_event(race_event)
+
+        buffered_count = await websocket_manager.get_buffered_count(conn.id, mission_id)
+        assert buffered_count == 1, f"Race event should be buffered, got {buffered_count}"
+
+        buffered = await websocket_manager.end_replay_buffer(conn.id, mission_id)
+        assert len(buffered) == 1
+        assert buffered[0].id == race_event.id
+
+        await websocket_manager.start_replay_buffer(conn.id, mission_id)
+        duplicate_event = replay_events[0]
+        await websocket_manager.broadcast_event(duplicate_event)
+        await websocket_manager.broadcast_event(race_event)
+        buffered2 = await websocket_manager.end_replay_buffer(conn.id, mission_id)
+        deduped = []
+        seen = set(replayed_ids)
+        for ev in buffered2:
+            if ev.id not in seen:
+                deduped.append(ev)
+                seen.add(ev.id)
+        assert len(deduped) == 1
+        assert deduped[0].id == race_event.id
+
+        mock_ws.send_text.reset_mock()
+        live_event = FakeEvent(uuid.uuid4(), now)
+        await websocket_manager.broadcast_event(live_event)
+        assert mock_ws.send_text.called
+        sent = json.loads(mock_ws.send_text.call_args[0][0])
+        assert sent["id"] == str(live_event.id)
+
+        await websocket_manager.disconnect(conn.id)
+        await websocket_manager.cleanup()
+
+    asyncio.get_event_loop().run_until_complete(run())
+
+
+def test_replay_live_race_integration(client: TestClient):
+    """
+    Integration test: event emitted during replay phase should not be lost
+    Uses real WS flow with gap-safe buffering
+    """
+    resp = client.post(
+        "/api/v1/missions/",
+        json={"title": "Race Integration", "goal": "g"},
+        headers={"Authorization": f"Bearer {TEST_TOKEN}"},
+    )
+    assert resp.status_code == 201
+    mission_id = resp.json()["id"]
+
+    resp = client.get(
+        f"/api/v1/missions/{mission_id}/events",
+        headers={"Authorization": f"Bearer {TEST_TOKEN}"},
+    )
+    initial_count = len(resp.json()["data"])
+
+    with client.websocket_connect("/api/v1/ws") as ws:
+        _auth(ws)
+        ws.send_text(json.dumps({"type": "subscribe", "mission_id": mission_id}))
+        sub_resp = json.loads(ws.receive_text())
+        assert sub_resp["type"] == "subscribed"
+        replay_count = sub_resp["replay_count"]
+        assert replay_count == initial_count
+
+        replayed_ids = []
+        for _ in range(replay_count):
+            data = ws.receive_text()
+            env = json.loads(data)
+            replayed_ids.append(env["id"])
+
+        client.patch(
+            f"/api/v1/missions/{mission_id}",
+            json={"status": "decomposing"},
+            headers={"Authorization": f"Bearer {TEST_TOKEN}"},
+        )
+
+        resp = client.get(
+            f"/api/v1/missions/{mission_id}/events",
+            headers={"Authorization": f"Bearer {TEST_TOKEN}"},
+        )
+        assert len(resp.json()["data"]) == initial_count + 1
+        new_event_id = resp.json()["data"][-1]["id"]
+        assert new_event_id not in replayed_ids
