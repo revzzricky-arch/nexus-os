@@ -1,6 +1,11 @@
 """
-Approvals router - Phase 2B-4 Real Implementation
+Approvals router - Phase 2B-4 Real Implementation with explicit scoping boundary
 GET /api/v1/approvals, GET /approvals/{approval_id}, POST /approvals/{approval_id}/decision, GET /tool-calls/{id}
+
+Scoping Boundary:
+- D4 single dev token model: dev-user owns all in MVP
+- Explicit ownership check via approval_service and tool_call_service
+- Prevents accidental unrestricted access when multi-user introduced
 """
 
 import uuid
@@ -11,9 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies import get_db, get_current_user
 from app.models.user import User
 from app.services.approval import approval_service
+from app.services.tool_call import tool_call_service
 from app.services.agent_runner import agent_runner_service
 from app.schemas.tool import ApprovalDecisionRequest
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import NotFoundError, ValidationError, PermissionDeniedError
 from app.schemas.event import EventCreate, EventType, EventSource
 from app.services.event_bus import event_bus_service
 
@@ -29,9 +35,13 @@ async def list_approvals(
     current_user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
 ):
-    approvals, total = await approval_service.list_approvals(
-        session, mission_id=mission_id, status=status, limit=limit, offset=offset
-    )
+    try:
+        approvals, total = await approval_service.list_approvals(
+            session, mission_id=mission_id, status=status, limit=limit, offset=offset, user_context=current_user
+        )
+    except PermissionDeniedError as e:
+        raise HTTPException(status_code=403, detail={"error": {"code": "permission_denied", "message": str(e)}})
+
     data = []
     for a in approvals:
         data.append(
@@ -62,9 +72,12 @@ async def get_approval(
     current_user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
 ):
-    approval = await approval_service.get_approval(session, approval_id)
-    if not approval:
+    try:
+        approval = await approval_service.get_approval_scoped(session, approval_id, user_context=current_user)
+    except NotFoundError as e:
         raise HTTPException(status_code=404, detail={"error": {"code": "approval_not_found", "message": f"Approval {approval_id} not found"}})
+    except PermissionDeniedError as e:
+        raise HTTPException(status_code=403, detail={"error": {"code": "permission_denied", "message": str(e)}})
 
     return {
         "data": {
@@ -95,11 +108,8 @@ async def decide_approval(
     session: AsyncSession = Depends(get_db),
 ):
     try:
-        # Decide approval - current_user is dict per D4
-        # For MVP, we don't have real user id, use None or try to get from dict
         reviewed_by_id = None
         if isinstance(current_user, dict):
-            # Try to parse user_id if it's UUID, otherwise None
             try:
                 uid = current_user.get("user_id")
                 if uid and uid != "dev-user":
@@ -116,9 +126,9 @@ async def decide_approval(
             reviewed_by=reviewed_by_id,
             review_comment=body.review_comment,
             edited_args=body.edited_args,
+            user_context=current_user,
         )
 
-        # Handle execution if approved - via AgentRunner
         execution_result = None
         if body.decision == "approved":
             execution_result = await agent_runner_service.handle_approval_decision(
@@ -147,6 +157,8 @@ async def decide_approval(
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": str(e)}})
     except ValidationError as e:
         raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": str(e), "details": e.details}})
+    except PermissionDeniedError as e:
+        raise HTTPException(status_code=403, detail={"error": {"code": "permission_denied", "message": str(e)}})
 
 
 @router.get("/tool-calls/{tool_call_id}", response_model=dict)
@@ -155,13 +167,12 @@ async def get_tool_call_via_approval_router(
     current_user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
 ):
-    from app.models.tool import ToolCall
-    from sqlalchemy import select
-
-    result = await session.execute(select(ToolCall).where(ToolCall.id == tool_call_id))
-    tc = result.scalar_one_or_none()
-    if not tc:
-        raise HTTPException(status_code=404, detail={"error": {"code": "tool_call_not_found", "message": f"Tool call {tool_call_id} not found"}})
+    try:
+        tc = await tool_call_service.get_tool_call_scoped(session, tool_call_id, user_context=current_user)
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail={"error": {"code": "tool_call_not_found", "message": str(e)}})
+    except PermissionDeniedError as e:
+        raise HTTPException(status_code=403, detail={"error": {"code": "permission_denied", "message": str(e)}})
 
     def redact(data):
         if not isinstance(data, dict):

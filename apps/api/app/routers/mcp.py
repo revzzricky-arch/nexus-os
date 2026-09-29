@@ -1,5 +1,5 @@
 """
-MCP router - Phase 2B-4 Real Implementation
+MCP router - Phase 2B-4 Real Implementation with SSE forbidden + secret reference enforcement
 GET /api/v1/mcp-servers, POST /mcp-servers, GET /mcp-servers/{id}/tools, DELETE /mcp-servers/{id}
 
 Security: Do not return raw MCP env/secret values to clients, redact sensitive env fields
@@ -21,22 +21,14 @@ router = APIRouter(prefix="/mcp-servers", tags=["mcp"])
 
 
 def _redact_env(env: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """
-    Redact sensitive env values - store only secret references where appropriate
-    Never return raw secrets to clients
-    """
     if not env:
         return env
     redacted = {}
     for k, v in env.items():
         lower_k = k.lower()
-        # Redact sensitive keys
         if any(secret_key in lower_k for secret_key in ["secret", "password", "token", "api_key", "apikey", "credential", "auth", "key"]):
-            # If value looks like secret reference (e.g., ${SECRET_REF}), keep reference indicator but not value
-            # For MVP, redact all sensitive values
             redacted[k] = "***REDACTED***"
         else:
-            # Even non-sensitive, if value is long and looks like secret, redact
             if isinstance(v, str) and len(v) > 20 and any(c in v for c in ["sk-", "secret"]):
                 redacted[k] = "***REDACTED***"
             else:
@@ -45,7 +37,6 @@ def _redact_env(env: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 
 def _redact_server_response(server) -> Dict[str, Any]:
-    """Return server data with redacted env"""
     return {
         "id": str(server.id),
         "name": server.name,
@@ -89,7 +80,6 @@ async def create_mcp_server(
             env=body.env,
             enabled=body.enabled,
         )
-        # Return redacted response - do not leak raw env
         return {"data": _redact_server_response(server)}
     except ValidationError as e:
         raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": str(e), "details": e.details}})

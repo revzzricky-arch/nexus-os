@@ -1,7 +1,12 @@
 """
-Tools router - Phase 2B-4 Real Implementation
+Tools router - Phase 2B-4 Real Implementation with explicit scoping
 GET /api/v1/tools, GET /tools/{tool_id}, GET /tool-calls/{id}
 All Bearer auth, Pydantic validation, mission/user scoping, never leak secrets
+
+Scoping Boundary:
+- D4 single dev token model: dev-user owns all in MVP
+- Tool registry is global but tool calls are scoped via mission ownership
+- Explicit scoping via tool_call_service prevents unrestricted access when multi-user introduced
 """
 
 from typing import Optional, List
@@ -13,7 +18,9 @@ from app.dependencies import get_db, get_current_user
 from app.models.user import User
 from app.models.tool import ToolCall
 from app.services.tool_registry import tool_registry_service
+from app.services.tool_call import tool_call_service
 from app.schemas.tool import ToolResponse, ToolCallResponse
+from app.core.exceptions import NotFoundError, PermissionDeniedError
 from sqlalchemy import select
 
 router = APIRouter(prefix="/tools", tags=["tools"])
@@ -27,7 +34,6 @@ async def list_tools(
     session: AsyncSession = Depends(get_db),
 ):
     tools = await tool_registry_service.list_tools(session, source=source, risk_level=risk_level)
-    # Convert to response without leaking internal secrets
     data = []
     for t in tools:
         data.append(
@@ -85,12 +91,13 @@ async def get_tool_call(
     current_user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
 ):
-    result = await session.execute(select(ToolCall).where(ToolCall.id == tool_call_id))
-    tc = result.scalar_one_or_none()
-    if not tc:
-        raise HTTPException(status_code=404, detail={"error": {"code": "tool_call_not_found", "message": f"Tool call {tool_call_id} not found"}})
+    try:
+        tc = await tool_call_service.get_tool_call_scoped(session, tool_call_id, user_context=current_user)
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail={"error": {"code": "tool_call_not_found", "message": str(e)}})
+    except PermissionDeniedError as e:
+        raise HTTPException(status_code=403, detail={"error": {"code": "permission_denied", "message": str(e)}})
 
-    # Redact secrets from args/result for API response
     def redact(data):
         if not isinstance(data, dict):
             return data

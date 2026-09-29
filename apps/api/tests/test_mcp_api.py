@@ -1,6 +1,7 @@
 """
 MCP API Tests - Phase 2B-4
 GET /mcp-servers, POST /mcp-servers, GET /mcp-servers/{id}/tools, DELETE /mcp-servers/{id}
++ SSE forbidden + secret reference + redaction
 """
 
 import uuid
@@ -84,6 +85,37 @@ async def test_create_mcp_server_api(async_session: AsyncSession, mock_user):
             headers={"Authorization": "Bearer test"},
         )
         assert resp2.status_code == 400
+
+        resp_sse = await client.post(
+            "/api/v1/mcp-servers",
+            json={"name": "sse test", "transport": "sse_legacy", "url": "https://example.com/sse"},
+            headers={"Authorization": "Bearer test"},
+        )
+        assert resp_sse.status_code == 400
+        assert "sse_legacy transport is disabled by default" in resp_sse.text
+
+        resp_ref = await client.post(
+            "/api/v1/mcp-servers",
+            json={"name": "secret ref", "transport": "stdio", "command": "python -m server", "env": {"API_KEY": "${MY_SECRET}"}},
+            headers={"Authorization": "Bearer test"},
+        )
+        assert resp_ref.status_code == 200
+        data = resp_ref.json()["data"]
+        assert data["env"]["API_KEY"] == "***REDACTED***"
+
+        resp_raw_token = await client.post(
+            "/api/v1/mcp-servers",
+            json={"name": "raw token", "transport": "stdio", "command": "python -m server", "env": {"api_key": "sk-1234567890abcdef1234567890"}},
+            headers={"Authorization": "Bearer test"},
+        )
+        assert resp_raw_token.status_code == 400
+
+        resp_raw_pw = await client.post(
+            "/api/v1/mcp-servers",
+            json={"name": "raw pw", "transport": "stdio", "command": "python -m server", "env": {"password": "supersecret123"}},
+            headers={"Authorization": "Bearer test"},
+        )
+        assert resp_raw_pw.status_code == 400
 
     app.dependency_overrides.clear()
 

@@ -1,6 +1,7 @@
 """
 MCP Manager Tests - Phase 2B-4
 stdio/streamable_http/SSE forbidden/mock discovery/no arbitrary auto-connect
++ SSE enforcement + secret reference validation
 """
 
 import uuid
@@ -8,7 +9,7 @@ import pytest
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 
 from app.db.base import Base
-from app.services.mcp_manager import mcp_manager, is_private_or_internal_url
+from app.services.mcp_manager import mcp_manager, is_private_or_internal_url, is_secret_reference
 from app.core.exceptions import ValidationError
 
 
@@ -77,6 +78,25 @@ async def test_sse_forbidden_by_default(async_session: AsyncSession):
     allowed_http = await mcp_manager.validate_transport_allowed("streamable_http")
     assert allowed_http is True
 
+    with pytest.raises(ValidationError) as exc:
+        await mcp_manager.create_server(async_session, name="sse test", transport="sse_legacy", url="https://example.com/sse")
+    assert "sse_legacy transport is disabled by default" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_sse_creating_fails_stdio_and_http_succeed(async_session: AsyncSession):
+    s1 = await mcp_manager.create_server(async_session, name="ok stdio", transport="stdio", command="python -m server")
+    assert s1.transport == "stdio"
+
+    s2 = await mcp_manager.create_server(async_session, name="ok http", transport="streamable_http", url="https://example.com/mcp")
+    assert s2.transport == "streamable_http"
+
+    with pytest.raises(ValidationError):
+        await mcp_manager.create_server(async_session, name="bad private", transport="streamable_http", url="http://192.168.1.1/mcp")
+
+    with pytest.raises(ValidationError):
+        await mcp_manager.create_server(async_session, name="bad sse", transport="sse_legacy", url="https://example.com/sse")
+
 
 @pytest.mark.asyncio
 async def test_mock_discovery(async_session: AsyncSession):
@@ -88,13 +108,76 @@ async def test_mock_discovery(async_session: AsyncSession):
 
 @pytest.mark.asyncio
 async def test_no_arbitrary_auto_connect(async_session: AsyncSession):
-    # list servers should not auto-connect to arbitrary URLs
     servers = await mcp_manager.list_servers(async_session)
     assert isinstance(servers, list)
-    # Creating server requires explicit config, not auto-connect from prompt
-    # Ensure we can't create with arbitrary URL from prompt without validation
     with pytest.raises(ValidationError):
         await mcp_manager.create_server(async_session, name="evil", transport="streamable_http", url="javascript:alert(1)")
 
     with pytest.raises(ValidationError):
         await mcp_manager.create_server(async_session, name="evil2", transport="streamable_http", url="ftp://example.com")
+
+
+def test_is_secret_reference():
+    assert is_secret_reference("${SECRET_NAME}") is True
+    assert is_secret_reference("${OPENAI_API_KEY}") is True
+    assert is_secret_reference("${{ secrets.MY_SECRET }}") is True
+    assert is_secret_reference("${env:MY_SECRET}") is True
+    assert is_secret_reference({"secret_ref": "MY_SECRET"}) is True
+    assert is_secret_reference({"secretRef": "MY_SECRET"}) is True
+    assert is_secret_reference("raw-secret-value") is False
+    assert is_secret_reference("sk-1234567890abcdef") is False
+    assert is_secret_reference("mypassword123") is False
+
+
+@pytest.mark.asyncio
+async def test_secret_reference_accepted(async_session: AsyncSession):
+    server = await mcp_manager.create_server(
+        async_session,
+        name="test secret ref",
+        transport="stdio",
+        command="python -m server",
+        env={"API_KEY": "${OPENAI_API_KEY}", "OTHER": "non-sensitive-value"},
+    )
+    assert server.env["API_KEY"] == "${OPENAI_API_KEY}"
+
+
+@pytest.mark.asyncio
+async def test_raw_api_token_rejected(async_session: AsyncSession):
+    with pytest.raises(ValidationError) as exc:
+        await mcp_manager.create_server(
+            async_session,
+            name="bad token",
+            transport="stdio",
+            command="python -m server",
+            env={"api_key": "sk-1234567890abcdef1234567890"},
+        )
+    assert "Raw secret values forbidden" in str(exc.value) or "secret" in str(exc.value).lower()
+    assert "sk-1234567890abcdef1234567890" not in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_raw_password_rejected(async_session: AsyncSession):
+    with pytest.raises(ValidationError):
+        await mcp_manager.create_server(
+            async_session,
+            name="bad password",
+            transport="stdio",
+            command="python -m server",
+            env={"password": "supersecretpassword123"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_response_never_exposes_secret_values(async_session: AsyncSession):
+    server = await mcp_manager.create_server(
+        async_session,
+        name="test redact",
+        transport="stdio",
+        command="python -m server",
+        env={"API_KEY": "${MY_SECRET}", "PUBLIC": "public-value"},
+    )
+    from app.routers.mcp import _redact_env
+    redacted = _redact_env(server.env)
+    assert redacted["API_KEY"] == "***REDACTED***"
+    assert redacted["PUBLIC"] == "public-value"
+    assert server.env["API_KEY"] == "${MY_SECRET}"

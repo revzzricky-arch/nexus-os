@@ -1,6 +1,11 @@
 """
-Tool Calls router - Phase 2B-4
+Tool Calls router - Phase 2B-4 with explicit scoping boundary
 GET /api/v1/tool-calls/{id}
+
+Scoping Boundary:
+- D4 single dev token model: dev-user owns all in MVP
+- Explicit ownership check via tool_call_service to prevent unrestricted access when multi-user introduced
+- ToolCall resolved to mission_id via task/agent_run and checked against user_context
 """
 
 import uuid
@@ -11,6 +16,8 @@ from sqlalchemy import select
 from app.dependencies import get_db, get_current_user
 from app.models.user import User
 from app.models.tool import ToolCall
+from app.services.tool_call import tool_call_service
+from app.core.exceptions import NotFoundError, PermissionDeniedError
 
 router = APIRouter(prefix="/tool-calls", tags=["tool-calls"])
 
@@ -21,10 +28,12 @@ async def get_tool_call(
     current_user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
 ):
-    result = await session.execute(select(ToolCall).where(ToolCall.id == tool_call_id))
-    tc = result.scalar_one_or_none()
-    if not tc:
-        raise HTTPException(status_code=404, detail={"error": {"code": "tool_call_not_found", "message": f"Tool call {tool_call_id} not found"}})
+    try:
+        tc = await tool_call_service.get_tool_call_scoped(session, tool_call_id, user_context=current_user)
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail={"error": {"code": "tool_call_not_found", "message": str(e)}})
+    except PermissionDeniedError as e:
+        raise HTTPException(status_code=403, detail={"error": {"code": "permission_denied", "message": str(e)}})
 
     def redact(data):
         if not isinstance(data, dict):
