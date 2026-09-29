@@ -110,24 +110,34 @@ export interface WSAuthMessage {
   token: string; // Bearer token value, sent as first WS message, not in URL
 }
 
+// Shared WS contract - must match backend apps/api/app/schemas/websocket.py + routers/ws.py
+// Backend uses mission_id + last_event_id (not channels[]), fixed in Phase 3 PR 3.1
+
 export interface WSSubscribeMessage {
   type: "subscribe";
-  channels: string[]; // e.g., ["mission:uuid", "approvals"]
-  last_event_id?: UUID; // for replay from Redis Stream
+  mission_id: UUID; // mission scope mandatory, no cross-mission leak
+  last_event_id?: UUID; // for replay from event table / Redis Stream
 }
 
 export interface WSUnsubscribeMessage {
   type: "unsubscribe";
-  channels: string[];
+  mission_id: UUID;
 }
 
-export type WSClientMessage = WSAuthMessage | WSSubscribeMessage | WSUnsubscribeMessage;
+export interface WSPingMessage {
+  type: "ping";
+}
+
+export type WSClientMessage = WSAuthMessage | WSSubscribeMessage | WSUnsubscribeMessage | WSPingMessage;
 
 export interface WSServerMessage {
-  type: "event" | "subscribed" | "unsubscribed" | "error" | "pong";
-  channel?: string;
+  type: "event" | "subscribed" | "unsubscribed" | "error" | "pong" | "auth_ok" | "auth_error" | "welcome";
+  mission_id?: UUID;
+  last_event_id?: UUID;
+  replay_count?: number;
   event?: EventEnvelope;
   message?: string;
+  code?: string;
 }
 
 // For 3D frontend/backend data flow - runtime state only

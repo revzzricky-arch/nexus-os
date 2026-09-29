@@ -18,6 +18,7 @@ from app.models.task import Task, TaskDependency
 from app.models.agent import Agent, AgentRun
 from app.models.event import Event
 from app.models.tool import ToolRegistry, MCPServer, ToolPermission, ToolCall, Approval
+from app.models.job import MissionJob
 
 __all__ = [
     "Base",
@@ -33,4 +34,5 @@ __all__ = [
     "ToolPermission",
     "ToolCall",
     "Approval",
+    "MissionJob",
 ]

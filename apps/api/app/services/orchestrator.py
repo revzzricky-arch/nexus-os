@@ -41,18 +41,48 @@ class OrchestratorService:
         self.supervisor = supervisor_service
         self.agent_runner = agent_runner_service
 
+    async def execute_mission_isolated(
+        self,
+        session: AsyncSession,
+        mission_id: uuid.UUID,
+    ) -> Dict[str, Any]:
+        """
+        Isolated execution entry point for Worker.
+        - Ownership moved from HTTP request → Worker
+        - This method does NOT depend on FastAPI request context
+        - It can be called from any worker process with just DB session + mission_id
+        - Multi-worker architecture (future):
+            - Each worker has unique worker_id
+            - All workers poll mission_jobs with FOR UPDATE SKIP LOCKED
+            - Only one worker atomically claims pending job
+            - Workers can run on different hosts sharing same DB
+            - Lease/heartbeat prevents duplicate execution
+            - Future replacement: LISTEN/NOTIFY or Redis Streams for lower latency
+            - This method remains the execution boundary, unchanged
+        - Checkpoint-based resume deferred to PR 3.2 (this PR only durable job recovery)
+        """
+        # Delegate to core execution logic
+        return await self._execute_mission_core(session, mission_id)
+
     async def start_mission(
         self,
         session: AsyncSession,
         mission_id: uuid.UUID,
     ) -> Dict[str, Any]:
         """
-        Start mission execution:
-        - verify mission exists
-        - verify valid starting state (draft, planned, failed can be restarted? For this PR: draft, planned, failed allowed)
-        - invoke Supervisor/LangGraph orchestration
-        - transition mission through proper lifecycle draft→decomposing→planned→running→completed or failed
-        - return mission execution info
+        Start mission execution (legacy synchronous entry point, now delegates to isolated core).
+        For Phase 3 durable worker, Worker calls execute_mission_isolated instead.
+        This method remains for backwards compatibility / tests.
+        """
+        return await self._execute_mission_core(session, mission_id)
+
+    async def _execute_mission_core(
+        self,
+        session: AsyncSession,
+        mission_id: uuid.UUID,
+    ) -> Dict[str, Any]:
+        """
+        Core mission execution logic - isolated from HTTP request
         """
 
         # Verify mission exists
