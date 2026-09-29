@@ -1,11 +1,24 @@
 """
-DB Base - Scaffold Placeholder
-No full schema yet, only infra for postgres+pgvector in docker-compose
+NEXUS - DB Base - Phase 2B Persistence Foundation
+SQLAlchemy 2 async declarative base
+Only minimal models: users, missions, tasks, task_dependencies, agents, agent_runs, events
+Deferred: tool_registry, mcp_servers, tool_permissions, tool_calls, approvals, audit_logs
 """
 
-# Placeholder for SQLAlchemy base - not implemented in scaffold
-# In Phase 2: from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy import MetaData
 
-class Base:
-    """Scaffold placeholder for SQLAlchemy Base"""
-    pass
+# Naming convention for Alembic
+convention = {
+    "ix": "ix_%(column_0_label)s",
+    "uq": "uq_%(table_name)s_%(column_0_name)s",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s",
+}
+
+metadata = MetaData(naming_convention=convention)
+
+
+class Base(DeclarativeBase):
+    metadata = metadata
