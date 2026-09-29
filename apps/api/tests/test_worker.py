@@ -647,7 +647,10 @@ async def test_claim_job_postgres_error_not_silently_fallback(session_factory):
     """Regression: PostgreSQL claim error must NOT be silently converted into unlocked claim"""
     # This test verifies the dialect logic
     # For SQLite, fallback is allowed
-    # For PostgreSQL (or empty dialect which defaults to postgres path), errors must propagate
+    # Required rule:
+    # - PostgreSQL → SKIP LOCKED, errors propagate
+    # - SQLite/aiosqlite → fallback allowed
+    # - Empty/unknown/unsupported → FAIL CLOSED
 
     mission = await create_mission(session_factory)
 
@@ -708,3 +711,25 @@ async def test_claim_job_postgres_error_not_silently_fallback(session_factory):
         await job_service.claim_job(mock_unknown, worker_id="test-unknown")
 
     assert "Unsupported dialect" in str(exc_info2.value)
+
+    # Empty dialect should also fail closed per required rule (do not silently treat as SQLite)
+    class MockEmptyDialect:
+        name = ""
+
+    class MockEmptyBind:
+        dialect = MockEmptyDialect()
+
+    class MockEmptySession:
+        def get_bind(self):
+            return MockEmptyBind()
+
+        async def execute(self, query):
+            return None
+
+    mock_empty = MockEmptySession()
+
+    with pytest.raises(Exception) as exc_info3:
+        await job_service.claim_job(mock_empty, worker_id="test-empty")
+
+    assert "Unsupported dialect" in str(exc_info3.value)
+    assert "fail closed" in str(exc_info3.value).lower() or "unsupported" in str(exc_info3.value).lower()

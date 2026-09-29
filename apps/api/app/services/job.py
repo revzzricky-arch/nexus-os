@@ -378,7 +378,9 @@ class JobService:
         dialect_name = dialect_name.lower()
 
         is_postgres = "postgres" in dialect_name or "pg" == dialect_name
-        is_sqlite = "sqlite" in dialect_name or "aiosqlite" in dialect_name or dialect_name == ""  # empty treated as sqlite for test/dev compatibility
+        # Only explicit sqlite/aiosqlite allowed for test/dev fallback
+        # Empty/unknown/unsupported must FAIL CLOSED per required rule
+        is_sqlite = "sqlite" in dialect_name or "aiosqlite" in dialect_name
 
         # For explicit postgres, use SKIP LOCKED and propagate errors (do NOT fallback silently)
         if is_postgres and not is_sqlite:
