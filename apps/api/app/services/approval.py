@@ -11,7 +11,8 @@ Scoping Boundary:
 - D4 single dev token model: authenticated user is dev-user, owns all missions in MVP
 - Explicit ownership boundary in service layer to prevent unrestricted access when multi-user introduced
 - All methods accept optional user_context and enforce mission ownership via user_id check
-- For Phase 2B-4, user_id check is permissive for dev-user but documented for future hardening
+- For Phase 2B-4, dev-user allowed for MVP, anonymous denied, future non-dev users actually compared against mission.user_id
+- Fail closed: no valid ownership match -> PermissionDeniedError, missing mission -> NotFoundError or PermissionDeniedError
 """
 
 import uuid
@@ -30,7 +31,7 @@ from app.core.exceptions import NotFoundError, ValidationError, PermissionDenied
 class ApprovalService:
     """
     Approval persistence service - source of truth Postgres
-    Explicit scoping boundary for future multi-user support
+    Explicit scoping boundary with real enforcement for future multi-user
     """
 
     def _get_user_id_from_context(self, user_context: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -48,9 +49,15 @@ class ApprovalService:
         user_context: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
-        Explicit ownership check - D4 single-user model
-        In MVP, dev-user owns all missions, anonymous has limited access
-        Future multi-user: check Mission.user_id == user_context.user_id
+        Explicit ownership check - D4 single-user model with real enforcement path for future users
+
+        Rules:
+        - No user_context (internal service call) -> allow
+        - dev-user -> allow for MVP (owns all)
+        - anonymous -> deny
+        - Future/non-dev user_context -> actually compare mission.user_id against authenticated identity
+          - If no valid ownership match -> PermissionDeniedError (fail closed, not silent pass)
+          - Missing mission -> NotFoundError (fail closed)
 
         This boundary prevents accidental unrestricted access when multi-user introduced
         """
@@ -65,10 +72,30 @@ class ApprovalService:
         try:
             result = await session.execute(select(Mission).where(Mission.id == mission_id))
             mission = result.scalar_one_or_none()
-            if mission and hasattr(mission, "user_id") and mission.user_id:
+        except Exception as e:
+            raise PermissionDeniedError(f"Failed to verify mission ownership for {mission_id}")
+
+        if not mission:
+            raise NotFoundError(f"Mission {mission_id} not found")
+
+        if not hasattr(mission, "user_id") or mission.user_id is None:
+            raise PermissionDeniedError(f"No valid ownership match for mission {mission_id} - mission has no owner, non-dev user denied")
+
+        try:
+            mission_user_id_str = str(mission.user_id)
+            context_user_id_str = str(user_id)
+            if mission_user_id_str == context_user_id_str:
+                return
+            try:
+                if uuid.UUID(mission_user_id_str) == uuid.UUID(context_user_id_str):
+                    return
+            except ValueError:
                 pass
-        except Exception:
-            pass
+            raise PermissionDeniedError(f"Ownership mismatch for mission {mission_id} - user {user_id} does not own mission owned by {mission.user_id}")
+        except PermissionDeniedError:
+            raise
+        except Exception as e:
+            raise PermissionDeniedError(f"Failed to verify ownership for mission {mission_id}")
 
     async def create_approval(
         self,
@@ -151,6 +178,15 @@ class ApprovalService:
         if status:
             filters.append(Approval.status == status)
 
+        user_id = self._get_user_id_from_context(user_context)
+        if user_id and user_id not in ("dev-user", "anonymous"):
+            if not mission_id:
+                try:
+                    query = query.join(Mission, Approval.mission_id == Mission.id).where(Mission.user_id == uuid.UUID(user_id) if self._is_uuid(user_id) else Mission.user_id == user_id)
+                    count_query = count_query.join(Mission, Approval.mission_id == Mission.id).where(Mission.user_id == uuid.UUID(user_id) if self._is_uuid(user_id) else Mission.user_id == user_id)
+                except Exception:
+                    return [], 0
+
         if filters:
             query = query.where(and_(*filters))
             count_query = count_query.where(and_(*filters))
@@ -164,6 +200,13 @@ class ApprovalService:
         total = count_result.scalar() or 0
 
         return approvals, total
+
+    def _is_uuid(self, val: str) -> bool:
+        try:
+            uuid.UUID(str(val))
+            return True
+        except ValueError:
+            return False
 
     async def decide_approval(
         self,
