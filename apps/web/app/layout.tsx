@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { RuntimeProvider } from "@/lib/runtime/providers";
 
 export const metadata: Metadata = {
   title: "NEXUS (Codename) - Mission Control",
@@ -37,7 +38,7 @@ export default function RootLayout({
           <div className="absolute inset-0 bg-[linear-gradient(to_right,#27272a_1px,transparent_1px),linear-gradient(to_bottom,#27272a_1px,transparent_1px)] bg-[size:4rem_4rem] opacity-[0.03]" />
           <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_hsl(262_60%_58%_/_0.08),transparent_60%)]" />
         </div>
-        {children}
+        <RuntimeProvider defaultMode="mock">{children}</RuntimeProvider>
       </body>
     </html>
   );
