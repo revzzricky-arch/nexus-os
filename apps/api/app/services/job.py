@@ -377,10 +377,10 @@ class JobService:
 
         dialect_name = dialect_name.lower()
 
-        is_postgres = "postgres" in dialect_name or "pg" == dialect_name or dialect_name == ""  # empty treated as postgres for safety (propagate errors)
-        is_sqlite = "sqlite" in dialect_name or "aiosqlite" in dialect_name
+        is_postgres = "postgres" in dialect_name or "pg" == dialect_name
+        is_sqlite = "sqlite" in dialect_name or "aiosqlite" in dialect_name or dialect_name == ""  # empty treated as sqlite for test/dev compatibility
 
-        # For explicit postgres or unknown empty (default to postgres behavior for prod), use SKIP LOCKED and propagate errors
+        # For explicit postgres, use SKIP LOCKED and propagate errors (do NOT fallback silently)
         if is_postgres and not is_sqlite:
             # PostgreSQL path - propagate database errors, do NOT use broad fallback
             query = text(
