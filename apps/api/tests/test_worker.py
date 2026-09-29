@@ -860,3 +860,186 @@ async def test_cancellation_immediately_before_finalization(session_factory):
         async with session_factory() as session:
             final_job = await job_service.get_job(session, job_id)
             assert final_job.status == "cancelled", f"Should remain cancelled when cancellation happens before finalization, got {final_job.status}"
+
+
+@pytest.mark.asyncio
+async def test_stale_worker_cannot_overwrite_new_owner(session_factory):
+    """
+    Regression: Worker A claims, lease expires, recovery requeues, Worker B claims,
+    Worker A tries to finalize old execution -> must fail, B's ownership remains authoritative
+    """
+    mission = await create_mission(session_factory)
+
+    async with session_factory() as session:
+        job = await job_service.create_job(session, mission_id=mission.id)
+        await session.commit()
+        job_id = job.id
+
+    # Worker A claims
+    async with session_factory() as session:
+        claimed_a = await job_service.claim_job(session, worker_id="worker-A")
+        await session.commit()
+        assert claimed_a.id == job_id
+        assert claimed_a.locked_by == "worker-A"
+        assert claimed_a.status == "running"
+
+    # Simulate lease expiry for Worker A
+    from datetime import timedelta
+    from app.services.job import LEASE_TIMEOUT_SECONDS
+
+    async with session_factory() as session:
+        # Make job stale
+        from app.models.job import MissionJob
+        job = await session.get(MissionJob, job_id)
+        job.heartbeat_at = datetime.now(timezone.utc) - timedelta(seconds=LEASE_TIMEOUT_SECONDS + 10)
+        job.locked_at = datetime.now(timezone.utc) - timedelta(seconds=LEASE_TIMEOUT_SECONDS + 10)
+        await session.commit()
+
+    # Stale recovery should requeue to pending
+    async with session_factory() as session:
+        recovered = await job_service.recover_stale_jobs(session, lease_timeout=LEASE_TIMEOUT_SECONDS)
+        await session.commit()
+        assert len(recovered) == 1
+        assert recovered[0].id == job_id
+        assert recovered[0].status == "pending"
+
+    # Worker B claims same job
+    async with session_factory() as session:
+        claimed_b = await job_service.claim_job(session, worker_id="worker-B")
+        await session.commit()
+        assert claimed_b.id == job_id
+        assert claimed_b.locked_by == "worker-B"
+        assert claimed_b.status == "running"
+        assert claimed_b.attempts == 2  # second attempt
+
+    # Worker A (stale) tries to finalize old execution with fencing - should NOT overwrite
+    async with session_factory() as session:
+        # Worker A tries to mark completed with its old ownership
+        result_job = await job_service.update_job_status(
+            session,
+            job_id,
+            "completed",
+            result={"stale": "worker-A"},
+            expected_locked_by="worker-A",
+            expected_status="running",
+        )
+        await session.commit()
+
+        # Fencing should prevent overwrite - result should still be owned by B and running
+        # Because Worker A's expected_locked_by does not match current locked_by (worker-B)
+        assert result_job.locked_by == "worker-B", f"Stale worker A should not overwrite B, got owner {result_job.locked_by}"
+        assert result_job.status == "running", f"Stale worker A should not mark completed, got {result_job.status}"
+
+    # Verify Worker B can still complete
+    async with session_factory() as session:
+        final = await job_service.update_job_status(
+            session,
+            job_id,
+            "completed",
+            result={"by": "worker-B"},
+            expected_locked_by="worker-B",
+            expected_status="running",
+        )
+        await session.commit()
+        assert final.status == "completed"
+        assert final.locked_by is None
+
+
+@pytest.mark.asyncio
+async def test_cancellation_followed_by_stale_completion_remains_cancelled(session_factory):
+    """Regression: cancellation followed by stale worker completion attempt remains cancelled"""
+    mission = await create_mission(session_factory)
+
+    async with session_factory() as session:
+        job = await job_service.create_job(session, mission_id=mission.id)
+        await session.commit()
+        job_id = job.id
+
+    # Worker A claims
+    async with session_factory() as session:
+        claimed = await job_service.claim_job(session, worker_id="worker-A")
+        await session.commit()
+        assert claimed.status == "running"
+
+    # Cancel from another session
+    async with session_factory() as session:
+        cancelled = await job_service.cancel_job(session, job_id)
+        await session.commit()
+        assert cancelled.status == "cancelled"
+
+    # Stale Worker A tries to mark completed - should fail due to terminal immutability and fencing
+    async with session_factory() as session:
+        # Try with fencing - should not overwrite
+        result = await job_service.update_job_status(
+            session,
+            job_id,
+            "completed",
+            result={"stale": "A"},
+            expected_locked_by="worker-A",
+            expected_status="running",
+        )
+        await session.commit()
+        assert result.status == "cancelled", f"Cancelled job should remain cancelled even after stale worker completion attempt, got {result.status}"
+
+    # Also test without fencing - terminal immutability should reject cancelled -> completed
+    async with session_factory() as session:
+        with pytest.raises(Exception) as exc_info:
+            await job_service.update_job_status(
+                session,
+                job_id,
+                "completed",
+                result={"should": "fail"},
+            )
+        assert "terminal" in str(exc_info.value).lower() or "immutable" in str(exc_info.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_terminal_immutability(session_factory):
+    """Regression: terminal states immutable except idempotent same-state"""
+    mission = await create_mission(session_factory)
+
+    async with session_factory() as session:
+        job = await job_service.create_job(session, mission_id=mission.id)
+        await session.commit()
+        job_id = job.id
+
+        # Move to completed
+        await job_service.update_job_status(session, job_id, "completed", result={"ok": True})
+        await session.commit()
+
+    # Try transitions from completed to other terminals - must fail
+    async with session_factory() as session:
+        with pytest.raises(Exception) as exc:
+            await job_service.update_job_status(session, job_id, "failed", error="should fail")
+        assert "terminal" in str(exc.value).lower() or "immutable" in str(exc.value).lower()
+
+    async with session_factory() as session:
+        with pytest.raises(Exception) as exc:
+            await job_service.update_job_status(session, job_id, "cancelled")
+        assert "terminal" in str(exc.value).lower() or "immutable" in str(exc.value).lower()
+
+    # Same-state idempotent should succeed
+    async with session_factory() as session:
+        same = await job_service.update_job_status(session, job_id, "completed")
+        await session.commit()
+        assert same.status == "completed"
+
+    # Test cancelled -> completed must fail
+    async with session_factory() as session:
+        job2 = await job_service.create_job(session, mission_id=mission.id)
+        await session.commit()
+        job2_id = job2.id
+
+        # Cancel it
+        await job_service.cancel_job(session, job2_id)
+        await session.commit()
+
+    async with session_factory() as session:
+        with pytest.raises(Exception) as exc:
+            await job_service.update_job_status(session, job2_id, "completed")
+        assert "terminal" in str(exc.value).lower()
+
+        with pytest.raises(Exception) as exc:
+            await job_service.update_job_status(session, job2_id, "failed")
+        assert "terminal" in str(exc.value).lower()
+

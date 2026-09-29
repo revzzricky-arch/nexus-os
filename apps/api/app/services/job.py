@@ -450,18 +450,115 @@ class JobService:
         status: str,
         result: Optional[Dict[str, Any]] = None,
         error: Optional[str] = None,
+        expected_locked_by: Optional[str] = None,
+        expected_status: Optional[str] = None,
     ) -> MissionJob:
+        """
+        Update job status with terminal immutability and optional fencing.
+
+        Terminal states completed/failed/cancelled are immutable once reached, except idempotent same-state.
+        Rejects:
+          cancelled -> completed, cancelled -> failed,
+          completed -> failed, completed -> cancelled,
+          failed -> completed, failed -> cancelled
+
+        For worker finalization, pass expected_locked_by and expected_status to enable atomic conditional UPDATE:
+          WHERE id = job_id AND status = expected_status AND locked_by = expected_locked_by
+        If zero rows updated, re-read authoritative job and do not overwrite cancelled/completed/failed or different owner.
+        """
         if status not in JOB_STATUSES:
             raise ValidationError(f"Invalid status: {status}")
 
+        terminal = {"completed", "failed", "cancelled"}
+
+        # If fencing parameters provided, use atomic conditional UPDATE to eliminate TOCTOU race
+        if expected_locked_by is not None or expected_status is not None:
+            from sqlalchemy import update as sa_update
+            import logging
+
+            logger = logging.getLogger(__name__)
+
+            conditions = [MissionJob.id == job_id]
+            if expected_status is not None:
+                conditions.append(MissionJob.status == expected_status)
+            if expected_locked_by is not None:
+                conditions.append(MissionJob.locked_by == expected_locked_by)
+
+            now = datetime.now(timezone.utc)
+            update_values: Dict[str, Any] = {
+                "status": status,
+                "updated_at": now,
+            }
+            if result is not None:
+                update_values["result"] = result
+            if error is not None:
+                update_values["error"] = error
+            if status in terminal:
+                update_values["locked_at"] = None
+                update_values["heartbeat_at"] = None
+                update_values["locked_by"] = None
+
+            stmt = sa_update(MissionJob).where(and_(*conditions)).values(**update_values)
+            exec_result = await session.execute(stmt)
+
+            if exec_result.rowcount == 0:
+                # No rows updated - re-read authoritative job
+                res = await session.execute(select(MissionJob).where(MissionJob.id == job_id))
+                fresh = res.scalar_one_or_none()
+                if not fresh:
+                    raise NotFoundError(f"Job {job_id} not found")
+
+                # If fresh is terminal with different state, do not overwrite
+                if fresh.status in terminal and fresh.status != status:
+                    logger.info(
+                        f"Job {job_id} already in terminal {fresh.status}, not overwriting with {status} (fencing)"
+                    )
+                    return fresh
+
+                # If ownership changed, do not overwrite
+                if expected_locked_by is not None and fresh.locked_by != expected_locked_by:
+                    logger.info(
+                        f"Job {job_id} ownership changed from {expected_locked_by} to {fresh.locked_by}, not overwriting with {status}"
+                    )
+                    # If fresh is cancelled, respect cancellation
+                    if fresh.status == "cancelled":
+                        return fresh
+                    # If fresh owned by another worker, respect new owner
+                    return fresh
+
+                # If status changed from expected, do not overwrite
+                if expected_status is not None and fresh.status != expected_status:
+                    logger.info(
+                        f"Job {job_id} status changed from expected {expected_status} to {fresh.status}, not overwriting with {status}"
+                    )
+                    return fresh
+
+                # Rowcount 0 but fresh still matches expected - could be same-state idempotent or race
+                # Return fresh as safe
+                return fresh
+
+            # Fetch updated job
+            res = await session.execute(select(MissionJob).where(MissionJob.id == job_id))
+            job = res.scalar_one_or_none()
+            if not job:
+                raise NotFoundError(f"Job {job_id} not found")
+            return job
+
+        # Non-fencing path: enforce terminal immutability
         res = await session.execute(select(MissionJob).where(MissionJob.id == job_id))
         job = res.scalar_one_or_none()
         if not job:
             raise NotFoundError(f"Job {job_id} not found")
 
-        terminal = {"completed", "failed", "cancelled"}
-        if job.status in terminal and status not in terminal:
-            raise ValidationError(f"Cannot transition from terminal {job.status} to {status}")
+        if job.status in terminal:
+            if job.status != status:
+                raise ValidationError(
+                    f"Cannot transition from terminal {job.status} to {status} - terminal states immutable (allowed only idempotent same-state)",
+                    details={"from": job.status, "to": status, "job_id": str(job_id)},
+                )
+            else:
+                # Idempotent same-state terminal update - return as-is
+                return job
 
         job.status = status
         if result is not None:

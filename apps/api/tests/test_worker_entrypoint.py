@@ -201,3 +201,53 @@ def test_api_remains_202_only_creates_job():
         # Allow orchestrator import elsewhere, but start endpoint should not have long-running exec
         # We check that start endpoint doesn't have run_forever or BackgroundTasks
         assert "BackgroundTasks" not in content or "start" not in content.lower()
+
+
+def test_compose_does_not_force_fixed_worker_id():
+    """Compose WORKER_ID must be optional/empty so multiple replicas get unique IDs via UUID generation"""
+    repo_root = pathlib.Path(__file__).resolve().parents[3]
+    compose_path = repo_root / "infra" / "docker-compose.yml"
+
+    if not compose_path.exists():
+        compose_path = pathlib.Path(__file__).resolve().parents[2] / ".." / ".." / "infra" / "docker-compose.yml"
+        compose_path = compose_path.resolve()
+
+    assert compose_path.exists(), f"docker-compose.yml not found at {compose_path}"
+
+    content = compose_path.read_text()
+
+    # Find worker service section
+    lines = content.split("\n")
+    in_worker = False
+    worker_env_lines = []
+    for i, line in enumerate(lines):
+        if line.strip().startswith("worker:"):
+            in_worker = True
+            continue
+        if in_worker:
+            # Detect end of worker service (next top-level service at same indent)
+            if line and not line.startswith(" ") and not line.startswith("\t") and line.strip().endswith(":"):
+                break
+            if "WORKER_ID" in line:
+                worker_env_lines.append(line.strip())
+
+    assert worker_env_lines, "worker service must have WORKER_ID env"
+
+    # Check that WORKER_ID is not hardcoded to worker-1 as fixed default
+    # Required: WORKER_ID: ${WORKER_ID:-} or ${WORKER_ID} or empty, not ${WORKER_ID:-worker-1}
+    for env_line in worker_env_lines:
+        # Should NOT be worker-1 as forced fixed ID
+        assert "worker-1" not in env_line, f"Compose should not force fixed worker ID worker-1, got {env_line} - causes multiple replicas to share same ID"
+
+        # Should be optional/empty default
+        # Acceptable patterns: ${WORKER_ID:-} or ${WORKER_ID} or not having default
+        # At minimum, must allow empty so worker_main generates UUID
+        assert "${WORKER_ID" in env_line, f"WORKER_ID should use env var substitution, got {env_line}"
+
+    # Verify worker_main generates UUID when WORKER_ID not supplied
+    import app.worker_main as worker_main
+    source = pathlib.Path(worker_main.__file__).read_text()
+    assert "uuid" in source.lower(), "worker_main must generate UUID when WORKER_ID not supplied"
+    assert "WORKER_ID" in source
+    # Check that it uses os.getenv with fallback to uuid
+    assert "os.getenv" in source and "worker-" in source

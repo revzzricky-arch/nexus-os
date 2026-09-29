@@ -99,7 +99,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       SECRET_KEY: ${SECRET_KEY:-dev-secret-change-me}
       NEXUS_DEV_TOKEN: ${NEXUS_DEV_TOKEN:-dev-token-change-me}
-      WORKER_ID: ${WORKER_ID:-worker-1}
+      WORKER_ID: ${WORKER_ID:-}
       WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-2.0}
       WORKER_LEASE_TIMEOUT: ${WORKER_LEASE_TIMEOUT:-60}
       WORKER_HEARTBEAT_INTERVAL: ${WORKER_HEARTBEAT_INTERVAL:-20}

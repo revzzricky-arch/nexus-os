@@ -134,6 +134,8 @@ class MissionWorker:
                     job_id,
                     "completed",
                     result=result,
+                    expected_locked_by=self.worker_id,
+                    expected_status="running",
                 )
 
                 logger.info(f"Worker {self.worker_id} job {job_id} completed for mission {job.mission_id}")
@@ -180,6 +182,8 @@ class MissionWorker:
                         job_id,
                         "pending",
                         error=str(e)[:1000],
+                        expected_locked_by=self.worker_id,
+                        expected_status="running",
                     )
                     logger.info(f"Worker {self.worker_id} job {job_id} retry {job.attempts}/{job.max_retries}")
                 else:
@@ -188,6 +192,8 @@ class MissionWorker:
                         job_id,
                         "failed",
                         error=str(e)[:1000],
+                        expected_locked_by=self.worker_id,
+                        expected_status="running",
                     )
                     try:
                         await mission_service.update_mission(
