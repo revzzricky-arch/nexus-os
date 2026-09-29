@@ -1,0 +1,1 @@
+-- Scaffold placeholder - pgvector extension enabled via image, full schema not yet

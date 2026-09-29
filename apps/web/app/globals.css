@@ -1,0 +1,78 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 240 10% 3.9%; /* zinc-950 #09090b */
+    --foreground: 0 0% 98%; /* zinc-100 */
+    --card: 240 6% 10%; /* zinc-900 */
+    --card-foreground: 0 0% 98%;
+    --popover: 240 6% 10%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 262 60% 58%; /* desaturated violet */
+    --primary-foreground: 0 0% 98%;
+    --secondary: 240 4% 16%; /* zinc-800 */
+    --secondary-foreground: 0 0% 98%;
+    --muted: 240 4% 16%;
+    --muted-foreground: 240 5% 64%; /* zinc-400 */
+    --accent: 240 4% 16%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 4% 16%; /* zinc-800 */
+    --input: 240 4% 16%;
+    --ring: 262 60% 58%;
+    --radius: 0.75rem; /* 12px rounded-xl */
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+  /* Technical typography - Geist/Inter + JetBrains Mono */
+  html {
+    font-family: var(--font-geist-sans), Inter, system-ui, sans-serif;
+  }
+  code, pre {
+    font-family: var(--font-geist-mono), JetBrains Mono, monospace;
+  }
+}
+
+/* Dark futuristic but professional - no excessive neon */
+@layer utilities {
+  .glass {
+    @apply backdrop-blur-xl bg-zinc-900/50 border border-zinc-800;
+  }
+  .glass-strong {
+    @apply backdrop-blur-xl bg-zinc-900/80 border border-zinc-800;
+  }
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* Scrollbar styling - subtle */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  @apply bg-zinc-900;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-zinc-700 rounded-full;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-zinc-600;
+}
+
+/* Selection */
+::selection {
+  background: hsl(262 60% 58% / 0.3);
+}

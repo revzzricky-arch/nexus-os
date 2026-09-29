@@ -1,0 +1,28 @@
+# NEXUS API - Scaffold Dependencies
+# Minimal FastAPI scaffold, no real LLM/MCP/RAG yet
+
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+pydantic-settings==2.5.2
+python-dotenv==1.0.1
+httpx==0.27.2
+
+# For future (not used in scaffold, but prepared)
+# sqlalchemy[asyncio]==2.0.32
+# asyncpg==0.30.0
+# alembic==1.13.2
+# redis==5.0.5
+# langgraph==0.2.28
+# langchain-core==0.3.15
+# mcp==1.0.0
+# pgvector==0.3.5
+# structlog==24.4.0
+# opentelemetry-api==1.27.0
+# opentelemetry-sdk==1.27.0
+# prometheus-client==0.20.0
+
+# Test
+pytest==8.3.2
+pytest-asyncio==0.24.0
+httpx==0.27.2

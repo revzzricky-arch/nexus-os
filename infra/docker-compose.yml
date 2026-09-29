@@ -1,0 +1,164 @@
+# NEXUS (Codename) - Docker Compose - MVP Scaffold
+# MVP deployment target is Docker Compose only, no cloud vendor commitment
+# Services: web, api, postgres+pgvector, redis, sandbox-runner placeholder (no exec yet)
+# Per review: D7 Docker Compose first, K8s future option
+
+version: "3.9"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: nexus-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-nexus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nexus}
+      POSTGRES_DB: ${POSTGRES_DB:-nexus}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Init script placeholder for pgvector extension (no full schema yet in scaffold)
+      - ./init-db:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexus} -d ${POSTGRES_DB:-nexus}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nexus-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: nexus-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --save 60 1
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - nexus-network
+
+  api:
+    build:
+      context: ../apps/api
+      dockerfile: Dockerfile
+    container_name: nexus-api
+    restart: unless-stopped
+    environment:
+      ENV: ${ENV:-development}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-nexus}:${POSTGRES_PASSWORD:-nexus}@postgres:5432/${POSTGRES_DB:-nexus}
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-change-me}
+      NEXUS_DEV_TOKEN: ${NEXUS_DEV_TOKEN:-dev-token-change-me}
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      # Model provider placeholders - no real calls in scaffold
+      MODEL_DEFAULT_PROVIDER: ${MODEL_DEFAULT_PROVIDER:-openai-compatible}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
+      SANDBOX_SERVICE_TYPE: ${SANDBOX_SERVICE_TYPE:-placeholder}
+      AUTH_MODE: ${AUTH_MODE:-bearer_token}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../apps/api:/app
+      - /app/__pycache__
+      - nexus_workspaces:/tmp/nexus-workspaces
+    networks:
+      - nexus-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  web:
+    build:
+      context: ../apps/web
+      dockerfile: Dockerfile
+    container_name: nexus-web
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://localhost:8000}
+      NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-NEXUS}
+      NEXT_PUBLIC_CODENAME_NOTE: ${NEXT_PUBLIC_CODENAME_NOTE:-Codename - Public name TBD}
+      NODE_ENV: ${ENV:-development}
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ../apps/web:/app
+      - /app/node_modules
+      - /app/.next
+    networks:
+      - nexus-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # Sandbox runner placeholder - MUST NOT execute arbitrary commands yet
+  # Per scaffold requirements: placeholder only, no real exec
+  sandbox-runner:
+    image: alpine:3.19
+    container_name: nexus-sandbox-runner
+    restart: "no"
+    command: ["sh", "-c", "echo 'Sandbox runner placeholder - no exec yet' && sleep infinity"]
+    volumes:
+      - nexus_workspaces:/tmp/nexus-workspaces:ro
+    networks:
+      - nexus-network
+    profiles:
+      - sandbox
+    # Security: no privileged, read-only root, no cap add
+    read_only: true
+    tmpfs:
+      - /tmp
+    # This service is placeholder only - does not execute arbitrary commands in scaffold phase
+
+  # Optional: OTel collector placeholder (no real tracing in scaffold)
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.96.0
+    container_name: nexus-otel
+    restart: unless-stopped
+    command: ["--config=/etc/otel-collector.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otel-collector.yaml
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    networks:
+      - nexus-network
+    profiles:
+      - observability
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  nexus_workspaces:
+    driver: local
+
+networks:
+  nexus-network:
+    driver: bridge
+    name: nexus-network
