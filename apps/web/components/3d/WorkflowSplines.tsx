@@ -24,27 +24,39 @@ interface WorkflowSplinesProps {
 export function WorkflowSplines({ agents, tasks, edges }: WorkflowSplinesProps) {
   const allNodes = useMemo(() => [...agents, ...tasks], [agents, tasks]);
 
-  return (
-    <group>
-      {edges.map((edge, idx) => {
+  // Only recompute edge list when nodes or edges actually change - not per frame
+  const edgeElements = useMemo(() => {
+    return edges
+      .map((edge, idx) => {
         const fromNode = allNodes.find((n) => n.id === edge.from);
         const toNode = allNodes.find((n) => n.id === edge.to);
         if (!fromNode || !toNode) return null;
-        return <SplineEdge key={`${edge.from}-${edge.to}-${idx}`} from={fromNode.position} to={toNode.position} status={edge.status} />;
-      })}
+        return {
+          key: `${edge.from}-${edge.to}-${idx}`,
+          from: fromNode.position,
+          to: toNode.position,
+          status: edge.status,
+        };
+      })
+      .filter(Boolean) as { key: string; from: [number, number, number]; to: [number, number, number]; status: string }[];
+  }, [allNodes, edges]);
+
+  return (
+    <group>
+      {edgeElements.map((e) => (
+        <SplineEdge key={e.key} from={e.from} to={e.to} status={e.status} />
+      ))}
     </group>
   );
 }
 
 function SplineEdge({ from, to, status }: { from: [number, number, number]; to: [number, number, number]; status: string }) {
   const lineRef = useRef<THREE.Line>(null);
-  const coneRef = useRef<THREE.Mesh>(null);
 
   const { curve, color, opacity, isActive } = useMemo(() => {
     const start = new THREE.Vector3(...from);
     const end = new THREE.Vector3(...to);
     const mid = new THREE.Vector3().addVectors(start, end).multiplyScalar(0.5);
-    // Elegant arc
     mid.y += 0.6;
 
     const curve = new THREE.CatmullRomCurve3([start, mid, end]);
@@ -82,47 +94,50 @@ function SplineEdge({ from, to, status }: { from: [number, number, number]; to: 
     return { curve, color: c, opacity: o, isActive: active };
   }, [from, to, status]);
 
-  const points = useMemo(() => curve.getPoints(32), [curve]);
-  const geometry = useMemo(() => new THREE.BufferGeometry().setFromPoints(points), [points]);
+  // Geometry only recomputed when curve changes (i.e., when from/to/status layout changes), not per frame
+  const geometry = useMemo(() => {
+    const points = curve.getPoints(32);
+    return new THREE.BufferGeometry().setFromPoints(points);
+  }, [curve]);
+
+  const material = useMemo(() => {
+    return new THREE.LineDashedMaterial({
+      color,
+      transparent: true,
+      opacity,
+      linewidth: 1,
+      dashSize: isActive ? 0.2 : 0,
+      gapSize: isActive ? 0.15 : 0,
+    });
+  }, [color, opacity, isActive]);
+
+  const lineObject = useMemo(() => {
+    const line = new THREE.Line(geometry, material);
+    line.computeLineDistances();
+    return line;
+  }, [geometry, material]);
 
   useFrame((state) => {
     if (!isActive || !lineRef.current) return;
     const t = state.clock.elapsedTime;
-    // Subtle movement for active - not noisy
     const mat = lineRef.current.material as THREE.LineDashedMaterial;
     if (mat && "dashOffset" in mat) {
       mat.dashOffset = -t * 0.5;
     }
   });
 
-  const endDir = useMemo(() => {
+  const { endPos, endDirQuat } = useMemo(() => {
     const tangent = curve.getTangent(0.9);
-    return tangent;
+    const pos = curve.getPoint(0.92);
+    const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), tangent);
+    return { endPos: pos, endDirQuat: quat };
   }, [curve]);
-
-  const endPos = useMemo(() => curve.getPoint(0.92), [curve]);
 
   return (
     <group>
-      <primitive
-        object={
-          new THREE.Line(
-            geometry,
-            new THREE.LineDashedMaterial({
-              color,
-              transparent: true,
-              opacity,
-              linewidth: 1,
-              dashSize: isActive ? 0.2 : 0,
-              gapSize: isActive ? 0.15 : 0,
-            })
-          )
-        }
-        ref={lineRef}
-      />
+      <primitive object={lineObject} ref={lineRef} />
 
-      {/* Arrow cone for direction - subtle */}
-      <mesh position={endPos} ref={coneRef} quaternion={new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), endDir)}>
+      <mesh position={endPos} quaternion={endDirQuat}>
         <coneGeometry args={[0.06, 0.14, 6]} />
         <meshStandardMaterial color={color} transparent opacity={opacity} emissive={color} emissiveIntensity={isActive ? 0.3 : 0.05} />
       </mesh>

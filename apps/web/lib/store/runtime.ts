@@ -62,6 +62,16 @@ interface RuntimeState {
   // In future, this store will be updated via WS events: EventEnvelope -> update agents/tasks/etc.
 }
 
+// Module-scoped interval handle for lifecycle-safe simulation - prevents overlapping intervals
+let missionProgressInterval: ReturnType<typeof setInterval> | null = null;
+
+function clearMissionInterval() {
+  if (missionProgressInterval) {
+    clearInterval(missionProgressInterval);
+    missionProgressInterval = null;
+  }
+}
+
 export const useRuntimeStore = create<RuntimeState>((set, get) => ({
   missions: mockMissions,
   agents: mockAgents,
@@ -115,6 +125,9 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
     })),
 
   runMission: (goal, type) => {
+    // Lifecycle-safe: prevent multiple overlapping progress intervals
+    clearMissionInterval();
+
     const newMission: MockMission = {
       id: `mission-${Date.now()}`,
       title: goal.slice(0, 60) || "New Mission",
@@ -142,13 +155,13 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
       agents: mockAgents.map((a) => ({ ...a, state: "PLANNING" as AgentState })),
     }));
 
-    // Simulate progress over time (mock runtime)
+    // Simulate progress over time (mock runtime) - lifecycle-safe with cleanup
     let progress = 5;
-    const interval = setInterval(() => {
+    missionProgressInterval = setInterval(() => {
       progress += Math.random() * 5;
       if (progress >= 100) {
         progress = 100;
-        clearInterval(interval);
+        clearMissionInterval();
         set((state) => ({
           activeMission: state.activeMission ? { ...state.activeMission, status: "completed", progress: 100, phase: "Completed" } : null,
           tasks: state.tasks.map((t) => ({ ...t, status: "COMPLETED" as TaskState, progress: 100 })),
