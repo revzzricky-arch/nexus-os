@@ -1,10 +1,12 @@
 """
 MCP router - Phase 2B-4 Real Implementation
 GET /api/v1/mcp-servers, POST /mcp-servers, GET /mcp-servers/{id}/tools, DELETE /mcp-servers/{id}
+
+Security: Do not return raw MCP env/secret values to clients, redact sensitive env fields
 """
 
 import uuid
-from typing import Optional
+from typing import Optional, Dict, Any
 from fastapi import APIRouter, Depends, Query, Path, Body, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +20,48 @@ from app.core.exceptions import NotFoundError, ValidationError
 router = APIRouter(prefix="/mcp-servers", tags=["mcp"])
 
 
+def _redact_env(env: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """
+    Redact sensitive env values - store only secret references where appropriate
+    Never return raw secrets to clients
+    """
+    if not env:
+        return env
+    redacted = {}
+    for k, v in env.items():
+        lower_k = k.lower()
+        # Redact sensitive keys
+        if any(secret_key in lower_k for secret_key in ["secret", "password", "token", "api_key", "apikey", "credential", "auth", "key"]):
+            # If value looks like secret reference (e.g., ${SECRET_REF}), keep reference indicator but not value
+            # For MVP, redact all sensitive values
+            redacted[k] = "***REDACTED***"
+        else:
+            # Even non-sensitive, if value is long and looks like secret, redact
+            if isinstance(v, str) and len(v) > 20 and any(c in v for c in ["sk-", "secret"]):
+                redacted[k] = "***REDACTED***"
+            else:
+                redacted[k] = v
+    return redacted
+
+
+def _redact_server_response(server) -> Dict[str, Any]:
+    """Return server data with redacted env"""
+    return {
+        "id": str(server.id),
+        "name": server.name,
+        "transport": server.transport,
+        "command": server.command,
+        "url": server.url,
+        "env": _redact_env(server.env),
+        "env_redacted": True if server.env else False,
+        "enabled": server.enabled,
+        "status": server.status,
+        "last_seen": server.last_seen.isoformat() if server.last_seen else None,
+        "created_at": server.created_at.isoformat() if server.created_at else None,
+        "updated_at": server.updated_at.isoformat() if server.updated_at else None,
+    }
+
+
 @router.get("", response_model=dict)
 async def list_mcp_servers(
     enabled_only: bool = Query(False, description="Filter enabled only"),
@@ -25,23 +69,7 @@ async def list_mcp_servers(
     session: AsyncSession = Depends(get_db),
 ):
     servers = await mcp_manager.list_servers(session, enabled_only=enabled_only)
-    data = []
-    for s in servers:
-        data.append(
-            {
-                "id": str(s.id),
-                "name": s.name,
-                "transport": s.transport,
-                "command": s.command,
-                "url": s.url,
-                "env": s.env,
-                "enabled": s.enabled,
-                "status": s.status,
-                "last_seen": s.last_seen.isoformat() if s.last_seen else None,
-                "created_at": s.created_at.isoformat() if s.created_at else None,
-                "updated_at": s.updated_at.isoformat() if s.updated_at else None,
-            }
-        )
+    data = [_redact_server_response(s) for s in servers]
     return {"data": data, "total": len(data)}
 
 
@@ -61,21 +89,8 @@ async def create_mcp_server(
             env=body.env,
             enabled=body.enabled,
         )
-        return {
-            "data": {
-                "id": str(server.id),
-                "name": server.name,
-                "transport": server.transport,
-                "command": server.command,
-                "url": server.url,
-                "env": server.env,
-                "enabled": server.enabled,
-                "status": server.status,
-                "last_seen": server.last_seen.isoformat() if server.last_seen else None,
-                "created_at": server.created_at.isoformat() if server.created_at else None,
-                "updated_at": server.updated_at.isoformat() if server.updated_at else None,
-            }
-        }
+        # Return redacted response - do not leak raw env
+        return {"data": _redact_server_response(server)}
     except ValidationError as e:
         raise HTTPException(status_code=400, detail={"error": {"code": "validation_error", "message": str(e), "details": e.details}})
 
@@ -87,10 +102,7 @@ async def list_mcp_server_tools(
     session: AsyncSession = Depends(get_db),
 ):
     try:
-        # Discover tools
         discovered = await mcp_manager.discover_tools(session, server_id)
-
-        # Register discovered tools via ToolRegistry
         registered = await tool_registry_service.discover_mcp_tools(session, server_id, discovered)
 
         data = []
