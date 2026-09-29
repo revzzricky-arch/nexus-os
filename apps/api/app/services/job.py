@@ -354,7 +354,35 @@ class JobService:
         worker_id: str,
         lease_timeout: int = LEASE_TIMEOUT_SECONDS,
     ) -> Optional[MissionJob]:
+        """
+        Claim pending job using SELECT ... FOR UPDATE SKIP LOCKED
+        - PostgreSQL: use SKIP LOCKED and propagate database errors (do NOT fallback silently)
+        - SQLite: use simplified fallback only because test/dev compatibility
+        - Unknown dialects: fail closed rather than unlocked claim
+        Uses session/engine dialect to select path explicitly.
+        """
+        # Determine dialect explicitly
+        dialect_name = ""
         try:
+            bind = session.get_bind()
+            if bind is not None:
+                dialect_name = getattr(bind.dialect, "name", "") or ""
+            else:
+                # Fallback try session.bind
+                b = getattr(session, "bind", None)
+                if b is not None:
+                    dialect_name = getattr(b.dialect, "name", "") or ""
+        except Exception:
+            dialect_name = ""
+
+        dialect_name = dialect_name.lower()
+
+        is_postgres = "postgres" in dialect_name or "pg" == dialect_name or dialect_name == ""  # empty treated as postgres for safety (propagate errors)
+        is_sqlite = "sqlite" in dialect_name or "aiosqlite" in dialect_name
+
+        # For explicit postgres or unknown empty (default to postgres behavior for prod), use SKIP LOCKED and propagate errors
+        if is_postgres and not is_sqlite:
+            # PostgreSQL path - propagate database errors, do NOT use broad fallback
             query = text(
                 """
                 SELECT id FROM mission_jobs
@@ -389,28 +417,29 @@ class JobService:
 
             return job
 
-        except Exception as e:
-            try:
-                query = select(MissionJob).where(MissionJob.status == "pending").order_by(MissionJob.created_at.asc()).limit(1)
-                result = await session.execute(query)
-                job = result.scalar_one_or_none()
-                if not job:
-                    return None
-
-                now = datetime.now(timezone.utc)
-                job.status = "running"
-                job.locked_by = worker_id
-                job.locked_at = now
-                job.heartbeat_at = now
-                job.attempts += 1
-                job.updated_at = now
-
-                await session.flush()
-                await session.refresh(job)
-
-                return job
-            except Exception:
+        elif is_sqlite:
+            # SQLite fallback only for test/dev compatibility
+            query = select(MissionJob).where(MissionJob.status == "pending").order_by(MissionJob.created_at.asc()).limit(1)
+            result = await session.execute(query)
+            job = result.scalar_one_or_none()
+            if not job:
                 return None
+
+            now = datetime.now(timezone.utc)
+            job.status = "running"
+            job.locked_by = worker_id
+            job.locked_at = now
+            job.heartbeat_at = now
+            job.attempts += 1
+            job.updated_at = now
+
+            await session.flush()
+            await session.refresh(job)
+
+            return job
+        else:
+            # Unknown/unsupported dialect - fail closed rather than silently using unlocked claim
+            raise ValidationError(f"Unsupported dialect {dialect_name} for claim_job - fail closed")
 
     async def update_job_status(
         self,

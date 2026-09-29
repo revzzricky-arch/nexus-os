@@ -484,3 +484,224 @@ async def test_recovery_preserves_locked_by(session_factory):
         await session.commit()
         assert len(recovered) == 1
         assert "preserved-worker-123" in recovered[0].error
+
+
+@pytest.mark.asyncio
+async def test_run_once_commits_claim_before_execution(session_factory):
+    """Regression: run_once must COMMIT claim transaction immediately before execute_job, releasing FOR UPDATE lock"""
+    mission = await create_mission(session_factory)
+
+    async with session_factory() as session:
+        job = await job_service.create_job(session, mission_id=mission.id)
+        await session.commit()
+        job_id = job.id
+
+    # Instrument ordering: track commit and execute_job calls
+    call_order = []
+
+    original_commit = None
+
+    with patch("app.services.orchestrator.orchestrator_service.execute_mission_isolated", new_callable=AsyncMock) as mock_exec:
+        async def exec_side_effect(*args, **kwargs):
+            call_order.append("execute_job")
+            await asyncio.sleep(0.1)
+            return {"status": "completed"}
+
+        mock_exec.side_effect = exec_side_effect
+
+        worker = MissionWorker(worker_id="test-commit-order", session_factory=session_factory)
+
+        # Patch the session.commit inside run_once to track ordering
+        # We wrap the session_factory to intercept commit
+        async with session_factory() as session:
+            # Instrument session.commit
+            orig_commit = session.commit
+
+            async def tracked_commit():
+                call_order.append("commit_claim")
+                await orig_commit()
+
+            session.commit = tracked_commit
+
+            # Need to also track execute_job separately - we already track via mock_exec
+            # But run_once will commit claim via session.commit, then execute via separate session
+            # For this test, we will directly test run_once ordering by checking that commit happens before execute
+
+            # Use a custom worker that records commit before execute
+            # Simpler: test the logic of run_once by mocking claim_job to return job and checking commit called before execute_job
+
+            # Restore and do more direct test below
+            session.commit = orig_commit
+
+        # More direct ordering test: mock claim_job and check commit called before execute_job
+        with patch.object(job_service, "claim_job", new_callable=AsyncMock) as mock_claim:
+            async def claim_side_effect(*args, **kwargs):
+                # Return a job-like object
+                async with session_factory() as s:
+                    j = await s.get(MissionJob, job_id)
+                    return j
+
+            mock_claim.side_effect = claim_side_effect
+
+            # Create a tracking session
+            async with session_factory() as tracking_session:
+                commit_called = False
+                execute_called = False
+                order = []
+
+                orig_commit2 = tracking_session.commit
+
+                async def tracked_commit2():
+                    nonlocal commit_called
+                    commit_called = True
+                    order.append("commit")
+                    await orig_commit2()
+
+                tracking_session.commit = tracked_commit2
+
+                # Patch execute_job to track
+                orig_execute = worker.execute_job
+
+                async def tracked_execute(sess, jid):
+                    nonlocal execute_called
+                    order.append("execute")
+                    execute_called = True
+                    # Verify commit happened before execute
+                    assert "commit" in order, "Claim transaction must be committed before execution begins"
+                    assert order.index("commit") < order.index("execute"), "Commit must occur before execute_job"
+                    return True
+
+                worker.execute_job = tracked_execute
+
+                # Mock claim_job to return job without needing DB
+                async with session_factory() as s:
+                    job_obj = await s.get(MissionJob, job_id)
+
+                # Simulate run_once logic manually to verify ordering
+                # Actually call run_once which should commit before execute
+                # We need to make claim_job return our job
+                with patch.object(job_service, "claim_job", new_callable=AsyncMock) as mock_claim2:
+                    mock_claim2.return_value = job_obj
+
+                    # Reset order
+                    order.clear()
+                    # Need to re-patch commit for this session
+                    tracking_session.commit = tracked_commit2
+                    worker.execute_job = tracked_execute
+
+                    result = await worker.run_once(tracking_session)
+                    # After run_once, order should have commit before execute
+                    assert "commit" in order
+                    assert "execute" in order
+                    assert order.index("commit") < order.index("execute")
+
+                worker.execute_job = orig_execute
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_cancellation_during_execution(session_factory):
+    """Verify heartbeat/cancellation can use another session while execution is in progress"""
+    mission = await create_mission(session_factory)
+
+    async with session_factory() as session:
+        job = await job_service.create_job(session, mission_id=mission.id)
+        await session.commit()
+        job_id = job.id
+
+    with patch("app.services.orchestrator.orchestrator_service.execute_mission_isolated", new_callable=AsyncMock) as mock_exec:
+        async def long_exec(*args, **kwargs):
+            # During execution, try heartbeat and cancellation from independent sessions
+            await asyncio.sleep(0.2)
+
+            # Heartbeat from independent session should succeed while execution in progress
+            async with session_factory() as hb_sess:
+                hb = await job_service.heartbeat_job(hb_sess, job_id, "test-hb-cancel")
+                await hb_sess.commit()
+                assert hb.heartbeat_at is not None
+
+            # Cancellation from independent session should also be possible (will be observed)
+            # We don't actually cancel here, just prove independent transaction works
+
+            return {"status": "completed"}
+
+        mock_exec.side_effect = long_exec
+
+        worker = MissionWorker(worker_id="test-hb-cancel", heartbeat_interval=0.05, session_factory=session_factory)
+
+        async with session_factory() as session:
+            claimed = await job_service.claim_job(session, worker_id=worker.worker_id)
+            await session.commit()
+            assert claimed.id == job_id
+
+        async with session_factory() as exec_session:
+            result = await worker.execute_job(exec_session, job_id)
+            await exec_session.commit()
+            assert result is True
+
+
+@pytest.mark.asyncio
+async def test_claim_job_postgres_error_not_silently_fallback(session_factory):
+    """Regression: PostgreSQL claim error must NOT be silently converted into unlocked claim"""
+    # This test verifies the dialect logic
+    # For SQLite, fallback is allowed
+    # For PostgreSQL (or empty dialect which defaults to postgres path), errors must propagate
+
+    mission = await create_mission(session_factory)
+
+    async with session_factory() as session:
+        job = await job_service.create_job(session, mission_id=mission.id)
+        await session.commit()
+
+    # For SQLite session, claim should work via fallback
+    async with session_factory() as session:
+        claimed = await job_service.claim_job(session, worker_id="test-sqlite")
+        await session.commit()
+        assert claimed is not None
+
+    # Now test that for a session with postgres dialect, error propagates
+    # We mock session.get_bind to return postgres dialect and make SELECT ... FOR UPDATE SKIP LOCKED fail
+    from unittest.mock import MagicMock
+
+    # Create a mock session that simulates postgres dialect and failing query
+    class MockPostgresDialect:
+        name = "postgresql"
+
+    class MockBind:
+        dialect = MockPostgresDialect()
+
+    class MockSession:
+        def get_bind(self):
+            return MockBind()
+
+        async def execute(self, query):
+            # Simulate DB error for SKIP LOCKED query
+            raise Exception("Simulated PostgreSQL error - should propagate, not fallback")
+
+    mock_session = MockSession()
+
+    # Should raise, not fallback to unlocked claim
+    with pytest.raises(Exception) as exc_info:
+        await job_service.claim_job(mock_session, worker_id="test-postgres-error")
+
+    assert "Simulated PostgreSQL error" in str(exc_info.value)
+
+    # Unknown dialect should fail closed
+    class MockUnknownDialect:
+        name = "oracle"
+
+    class MockUnknownBind:
+        dialect = MockUnknownDialect()
+
+    class MockUnknownSession:
+        def get_bind(self):
+            return MockUnknownBind()
+
+        async def execute(self, query):
+            return None
+
+    mock_unknown = MockUnknownSession()
+
+    with pytest.raises(Exception) as exc_info2:
+        await job_service.claim_job(mock_unknown, worker_id="test-unknown")
+
+    assert "Unsupported dialect" in str(exc_info2.value)

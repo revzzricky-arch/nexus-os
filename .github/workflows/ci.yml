@@ -83,9 +83,10 @@ jobs:
           python -c "from app.core.embedding_provider import get_embedding_provider; print('EmbeddingProvider OK')"
           python -c "from app.core.sandbox import get_sandbox_service; print('SandboxService OK')"
 
-      - name: Run smoke tests (/health, /version)
+      - name: Run full backend test suite
         run: |
-          pytest -v tests/test_health.py
+          pytest -v
+          echo \"Full backend pytest suite passed\"
 
       - name: Security scan - no hardcoded secrets, no eval/exec abuse
         run: |

@@ -222,18 +222,41 @@ class MissionWorker:
                 continue
 
     async def run_once(self, session: AsyncSession) -> Optional[uuid.UUID]:
+        """
+        Run one iteration: claim pending job and execute
+        Transaction boundary fix:
+        - claim_job() -> COMMIT claim immediately to release FOR UPDATE SKIP LOCKED lock
+        - execute_job() -> heartbeat continues from independent session
+        - final job status is committed
+        This prevents row lock being held for entire mission execution, allowing heartbeat/cancellation via independent transactions.
+        """
         try:
             job = await job_service.claim_job(session, self.worker_id, lease_timeout=self.lease_timeout)
             if not job:
                 return None
 
-            logger.info(f"Worker {self.worker_id} claimed job {job.id} for mission {job.mission_id}")
+            # COMMIT claim transaction immediately to release FOR UPDATE SKIP LOCKED lock
+            await session.commit()
 
-            await self.execute_job(session, job.id)
+            logger.info(f"Worker {self.worker_id} claimed job {job.id} for mission {job.mission_id} and committed claim")
+
+            # Execute job using independent execution session if factory available, else reuse session (new transaction)
+            if self._session_factory:
+                async with self._session_factory() as exec_session:
+                    await self.execute_job(exec_session, job.id)
+                    await exec_session.commit()
+            else:
+                # No factory - use same session but now in new transaction after commit
+                await self.execute_job(session, job.id)
+                await session.commit()
 
             return job.id
 
         except Exception as e:
+            try:
+                await session.rollback()
+            except Exception:
+                pass
             logger.warning(f"Worker {self.worker_id} run_once failed: {e}")
             return None
 
