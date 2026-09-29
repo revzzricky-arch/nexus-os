@@ -97,6 +97,15 @@ jobs:
           name: pytest-output
           path: /tmp/pytest_output.txt
 
+      - name: Show pytest failures in log summary
+        if: failure()
+        run: |
+          echo "### Pytest Failures" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -n 300 /tmp/pytest_output.txt >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat /tmp/pytest_output.txt | grep -E "FAILED|ERROR|test_" | tail -n 100 || true
+
       - name: Security scan - no hardcoded secrets, no eval/exec abuse
         run: |
           echo "Scanning for hardcoded secrets and dangerous functions..."
