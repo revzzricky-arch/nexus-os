@@ -85,8 +85,17 @@ jobs:
 
       - name: Run full backend test suite
         run: |
-          pytest -v -W ignore::pytest.PytestUnhandledThreadExceptionWarning -W ignore::DeprecationWarning --tb=short
+          set -o pipefail
+          pytest -v --tb=long -vv -W ignore 2>&1 | tee /tmp/pytest_output.txt
           echo "Full backend pytest suite passed"
+          cat /tmp/pytest_output.txt
+
+      - name: Upload pytest output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output
+          path: /tmp/pytest_output.txt
 
       - name: Security scan - no hardcoded secrets, no eval/exec abuse
         run: |
