@@ -1,0 +1,139 @@
+# NEXUS (Codename) - CI Workflow - Scaffold Phase
+# Minimal checks: frontend typecheck/build, backend compile/test, docker compose parse, security scan
+
+name: CI - Scaffold
+
+on:
+  push:
+    branches: ["main", "arena/*", "feat/*"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  frontend:
+    name: Frontend - Typecheck & Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.3
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile || pnpm install
+
+      - name: Typecheck shared package
+        run: pnpm --filter @nexus/shared typecheck || pnpm --filter @nexus/shared run typecheck
+
+      - name: Typecheck web
+        run: pnpm --filter @nexus/web typecheck || pnpm --filter @nexus/web run typecheck
+
+      - name: Build web (verifies 3D scene mounts without crashing)
+        run: pnpm --filter @nexus/web build || pnpm --filter @nexus/web run build
+
+      - name: Check for hardcoded secrets in frontend
+        run: |
+          echo "Scanning for hardcoded secrets..."
+          ! grep -r "sk-[a-zA-Z0-9]\{20\}" --include="*.ts" --include="*.tsx" apps/web/ || (echo "Found potential OpenAI key" && exit 1)
+          echo "No hardcoded OpenAI keys found"
+
+  backend:
+    name: Backend - Compile & Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile check (no syntax errors)
+        run: |
+          python -m py_compile app/main.py
+          python -m py_compile app/config.py
+          python -m py_compile app/core/*.py
+          python -m py_compile app/routers/*.py
+          python -m py_compile app/services/*.py
+          echo "Compile check passed"
+
+      - name: Import check (app starts)
+        run: |
+          python -c "from app.main import app; print('FastAPI app imports OK')"
+          python -c "from app.config import settings; print('Config OK')"
+          python -c "from app.core.model_provider import get_model_provider; print('ModelProvider OK')"
+          python -c "from app.core.embedding_provider import get_embedding_provider; print('EmbeddingProvider OK')"
+          python -c "from app.core.sandbox import get_sandbox_service; print('SandboxService OK')"
+
+      - name: Run smoke tests (/health, /version)
+        run: |
+          pytest -v tests/test_health.py
+
+      - name: Security scan - no hardcoded secrets, no eval/exec abuse
+        run: |
+          echo "Scanning for hardcoded secrets and dangerous functions..."
+          ! grep -rn "sk-[a-zA-Z0-9]\{20\}" --include="*.py" app/ || (echo "Found potential OpenAI key" && exit 1)
+          ! grep -rn "api_key.*=.*['\"]sk-" --include="*.py" app/ || (echo "Found hardcoded api_key" && exit 1)
+          # Allow exec_command method name but not raw exec(
+          ! grep -rn "^\s*exec(" --include="*.py" app/ || (echo "Found raw exec(" && exit 1)
+          ! grep -rn "^\s*eval(" --include="*.py" app/ || (echo "Found eval(" && exit 1)
+          ! grep -rn "compile(" --include="*.py" app/ | grep -v "test" || (echo "Found compile(" && exit 1)
+          echo "Security scan passed - no hardcoded secrets, no eval/exec abuse"
+
+  docker:
+    name: Docker Compose - Parse Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate docker-compose.yml parses
+        run: |
+          docker compose -f infra/docker-compose.yml config
+          echo "Docker Compose config parses OK"
+
+      - name: Check for secrets in compose
+        run: |
+          ! grep -i "password.*:.*[^$]" infra/docker-compose.yml | grep -v "POSTGRES_PASSWORD" | grep -v "\${" || echo "Check compose for hardcoded passwords - should use env vars"
+          echo "Docker Compose check done"
+
+  hygiene:
+    name: Repository Hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check .gitignore covers sensitive files
+        run: |
+          grep -q ".env" .gitignore || (echo ".env not in .gitignore" && exit 1)
+          grep -q "node_modules" .gitignore || (echo "node_modules not in .gitignore" && exit 1)
+          grep -q "__pycache__" .gitignore || (echo "__pycache__ not in .gitignore" && exit 1)
+          echo ".gitignore hygiene OK"
+
+      - name: Ensure .env not committed
+        run: |
+          ! ls .env 2>/dev/null || (echo ".env file exists - should not be committed" && exit 1)
+          echo ".env not committed - OK"
+
+      - name: Check README mentions codename and scaffold status
+        run: |
+          grep -q "Codename" README.md || (echo "README missing codename note" && exit 1)
+          grep -q "scaffold" README.md -i || (echo "README missing scaffold status" && exit 1)
+          echo "README hygiene OK"

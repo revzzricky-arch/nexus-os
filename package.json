@@ -1,0 +1,48 @@
+{
+  "name": "nexus-os",
+  "private": true,
+  "version": "0.1.0-scaffold",
+  "description": "NEXUS (Codename) - 3D Agent Operating System / AI Agent Command Center - Scaffold Phase",
+  "packageManager": "pnpm@9.12.3",
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "pnpm --parallel -r dev",
+    "dev:web": "pnpm --filter @nexus/web dev",
+    "dev:api": "pnpm --filter @nexus/api dev || cd apps/api && python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000",
+    "build": "pnpm -r build",
+    "build:web": "pnpm --filter @nexus/web build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "clean": "pnpm -r clean && rm -rf node_modules",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\" --ignore-path .gitignore",
+    "docker:up": "docker compose -f infra/docker-compose.yml up -d",
+    "docker:down": "docker compose -f infra/docker-compose.yml down",
+    "docker:logs": "docker compose -f infra/docker-compose.yml logs -f"
+  },
+  "devDependencies": {
+    "prettier": "^3.3.3",
+    "typescript": "^5.6.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/revzzricky-arch/nexus-os"
+  },
+  "keywords": [
+    "agent-os",
+    "ai-agents",
+    "3d",
+    "mission-control",
+    "orchestration"
+  ],
+  "license": "MIT",
+  "codename": "NEXUS",
+  "note": "Temporary codename - public product name TBD due to existing NexusOS projects"
+}
