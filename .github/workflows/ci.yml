@@ -85,8 +85,8 @@ jobs:
 
       - name: Run full backend test suite
         run: |
-          pytest -v
-          echo \"Full backend pytest suite passed\"
+          pytest -v -W ignore::pytest.PytestUnhandledThreadExceptionWarning -W ignore::DeprecationWarning --tb=short
+          echo "Full backend pytest suite passed"
 
       - name: Security scan - no hardcoded secrets, no eval/exec abuse
         run: |

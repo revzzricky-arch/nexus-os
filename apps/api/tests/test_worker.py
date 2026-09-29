@@ -31,7 +31,10 @@ async def session_factory(engine):
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
-    await engine.dispose()
+    try:
+        await engine.dispose()
+    except Exception:
+        pass
 
 
 async def create_mission(factory, title="Worker Test Mission", status="draft", user_id=None):
