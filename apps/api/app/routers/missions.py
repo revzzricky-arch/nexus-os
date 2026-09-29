@@ -144,18 +144,18 @@ async def cancel_mission(
     - completed/failed/cancelled → idempotent (do not error)
     - Validates via MissionService, does not bypass
     - Also cancels associated jobs via JobService
+    - Consistent transaction: mission + jobs cancelled atomically, job failures surface and rollback
     """
     try:
         from app.services.job import job_service
 
-        # Validate via MissionService (do not bypass)
+        # Validate via MissionService (do not bypass) - mission cancellation first in same transaction
         mission = await mission_service.cancel_mission(db, mission_id)
 
-        # Integrate job cancellation with ownership enforcement
-        try:
-            await job_service.cancel_jobs_for_mission(db, mission_id, user_context=user)
-        except Exception:
-            pass
+        # Integrate job cancellation with ownership enforcement - do NOT swallow errors
+        # If job cancellation fails, mission cancellation must roll back to avoid inconsistent state
+        # (mission cancelled but job still running)
+        await job_service.cancel_jobs_for_mission(db, mission_id, user_context=user)
 
         return mission
     except DomainError as e:

@@ -97,6 +97,38 @@ class MissionWorker:
                         pass
                     return False
 
+                # Cancellation race fix: before marking completed, re-read authoritative job row via independent session
+                # If cancelled in another transaction while execution was in progress, do NOT overwrite cancelled -> completed
+                try:
+                    if self._session_factory:
+                        async with self._session_factory() as auth_session:
+                            authoritative_job = await job_service.get_job(auth_session, job_id)
+                            if authoritative_job.status == "cancelled":
+                                logger.info(
+                                    f"Worker {self.worker_id} job {job_id} found cancelled in authoritative check before completion, not marking completed"
+                                )
+                                return True
+                    else:
+                        # Fallback: refresh current session's job
+                        await session.refresh(job)
+                        if job.status == "cancelled":
+                            logger.info(
+                                f"Worker {self.worker_id} job {job_id} cancelled (refresh) before completion, not marking completed"
+                            )
+                            return True
+                except Exception as e:
+                    # If authoritative check fails, try refresh as best-effort, but don't silently overwrite cancelled
+                    logger.debug(f"Worker {self.worker_id} authoritative cancellation check failed for {job_id}: {e}")
+                    try:
+                        await session.refresh(job)
+                        if job.status == "cancelled":
+                            logger.info(
+                                f"Worker {self.worker_id} job {job_id} cancelled (fallback refresh) before completion"
+                            )
+                            return True
+                    except Exception:
+                        pass
+
                 await job_service.update_job_status(
                     session,
                     job_id,
@@ -120,6 +152,19 @@ class MissionWorker:
                                     return True
                     except Exception:
                         pass
+
+                # Authoritative cancellation check before handling failure/retry
+                try:
+                    if self._session_factory:
+                        async with self._session_factory() as auth_session:
+                            authoritative_job = await job_service.get_job(auth_session, job_id)
+                            if authoritative_job.status == "cancelled":
+                                logger.info(
+                                    f"Worker {self.worker_id} job {job_id} found cancelled before failure handling, not retrying"
+                                )
+                                return True
+                except Exception as ex:
+                    logger.debug(f"Worker {self.worker_id} authoritative check before failure handling failed: {ex}")
 
                 try:
                     await session.refresh(job)

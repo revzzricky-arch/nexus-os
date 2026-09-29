@@ -47,7 +47,7 @@ def client():
                 await session.close()
 
     async def override_get_current_user():
-        return {"user_id": "test-user", "token_valid": True}
+        return {"user_id": "dev-user", "token_valid": True}
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_current_user] = override_get_current_user
@@ -411,3 +411,72 @@ def test_get_mission_events_last_event_id(client: TestClient):
     assert data["total"] >= 1
     # Should not include first event
     assert all(e["id"] != first_event_id for e in data["data"])
+
+
+def test_cancel_mission_does_not_swallow_job_cancellation_failure():
+    """Regression: job cancellation failure must NOT be silently swallowed leaving mission cancelled but job running"""
+    from unittest.mock import AsyncMock, patch
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.db.base import Base
+    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+    import asyncio
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+
+    async def init_db():
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    asyncio.get_event_loop().run_until_complete(init_db())
+
+    async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def override_get_db():
+        async with async_session_factory() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+            finally:
+                await session.close()
+
+    async def override_get_current_user():
+        return {"user_id": "dev-user", "token_valid": True}
+
+    from app.dependencies import get_db, get_current_user
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user] = override_get_current_user
+
+    # Do not raise server exceptions, we want to check response status
+    test_client = TestClient(app, raise_server_exceptions=False)
+
+    try:
+        resp = test_client.post(
+            "/api/v1/missions/",
+            json={"title": "Cancel Job Fail Test", "goal": "goal"},
+            headers={"Authorization": f"Bearer {TEST_TOKEN}"},
+        )
+        assert resp.status_code == 201
+        mission_id = resp.json()["id"]
+
+        # Mock job_service.cancel_jobs_for_mission to fail
+        with patch("app.services.job.job_service.cancel_jobs_for_mission", new_callable=AsyncMock) as mock_cancel:
+            mock_cancel.side_effect = Exception("Simulated job cancellation DB failure")
+
+            resp = test_client.post(f"/api/v1/missions/{mission_id}/cancel", headers={"Authorization": f"Bearer {TEST_TOKEN}"})
+
+            # Should NOT silently succeed - must surface error (400 or 500, not 200)
+            assert resp.status_code != 200, f"Mission cancellation should not silently succeed when job cancellation fails, got {resp.status_code} body {resp.text}"
+
+            # Verify mission is NOT left in inconsistent state (rolled back to draft, not cancelled)
+            resp_get = test_client.get(f"/api/v1/missions/{mission_id}", headers={"Authorization": f"Bearer {TEST_TOKEN}"})
+            if resp_get.status_code == 200:
+                status = resp_get.json()["mission"]["status"]
+                assert status != "cancelled", f"Mission should not be cancelled when job cancellation fails, got {status} - indicates swallowed error"
+    finally:
+        app.dependency_overrides.clear()
+        asyncio.get_event_loop().run_until_complete(engine.dispose())

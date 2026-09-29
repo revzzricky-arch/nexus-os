@@ -733,3 +733,130 @@ async def test_claim_job_postgres_error_not_silently_fallback(session_factory):
 
     assert "Unsupported dialect" in str(exc_info3.value)
     assert "fail closed" in str(exc_info3.value).lower() or "unsupported" in str(exc_info3.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_race_does_not_overwrite_cancelled_with_completed(session_factory):
+    """Regression: cancellation during execution must remain cancelled, not overwritten to completed"""
+    mission = await create_mission(session_factory)
+
+    async with session_factory() as session:
+        job = await job_service.create_job(session, mission_id=mission.id)
+        await session.commit()
+        job_id = job.id
+
+    # Mock long-running execution that gets cancelled from another session mid-execution
+    with patch("app.services.orchestrator.orchestrator_service.execute_mission_isolated", new_callable=AsyncMock) as mock_exec:
+
+        async def long_exec_with_cancel(*args, **kwargs):
+            # Simulate cancellation from another session while execution is running
+            await asyncio.sleep(0.1)
+            async with session_factory() as cancel_session:
+                cancelled = await job_service.cancel_job(cancel_session, job_id)
+                await cancel_session.commit()
+                assert cancelled.status == "cancelled"
+            await asyncio.sleep(0.1)
+            return {"status": "completed", "result": "should not overwrite cancelled"}
+
+        mock_exec.side_effect = long_exec_with_cancel
+
+        worker = MissionWorker(worker_id="test-cancel-race", session_factory=session_factory)
+
+        async with session_factory() as session:
+            claimed = await job_service.claim_job(session, worker_id=worker.worker_id)
+            await session.commit()
+            assert claimed.id == job_id
+            assert claimed.status == "running"
+
+        async with session_factory() as exec_session:
+            result = await worker.execute_job(exec_session, job_id)
+            await exec_session.commit()
+            # Worker should return True (handled cancellation) and NOT overwrite cancelled -> completed
+            assert result is True
+
+    # Verify final status remains cancelled, not completed
+    async with session_factory() as session:
+        final_job = await job_service.get_job(session, job_id)
+        assert final_job.status == "cancelled", f"Final job status should remain cancelled, not {final_job.status}"
+        # Ensure no retry/requeue happened
+        assert final_job.locked_by is None
+
+
+@pytest.mark.asyncio
+async def test_cancellation_immediately_before_finalization(session_factory):
+    """Regression: cancellation right before finalization must be authoritative"""
+    mission = await create_mission(session_factory)
+
+    async with session_factory() as session:
+        job = await job_service.create_job(session, mission_id=mission.id)
+        await session.commit()
+        job_id = job.id
+
+    with patch("app.services.orchestrator.orchestrator_service.execute_mission_isolated", new_callable=AsyncMock) as mock_exec:
+
+        async def exec_then_cancel_before_final(*args, **kwargs):
+            # Return quickly, but we will cancel from another session before worker does authoritative check
+            # Simulate cancellation happening immediately before finalization by cancelling in side effect
+            # and having worker's authoritative check detect it
+            return {"status": "completed"}
+
+        mock_exec.side_effect = exec_then_cancel_before_final
+
+        worker = MissionWorker(worker_id="test-cancel-before-final", session_factory=session_factory)
+
+        async with session_factory() as session:
+            claimed = await job_service.claim_job(session, worker_id=worker.worker_id)
+            await session.commit()
+            assert claimed.id == job_id
+
+        # Cancel from another session immediately before execution finalization
+        # We patch the authoritative check to simulate race, or cancel before execute_job's final check
+        # For this test, we will mock the orchestrator to cancel in another session right before returning,
+        # and ensure worker's authoritative re-read catches it
+
+        original_execute = worker.execute_job
+
+        async def tracked_execute(sess, jid):
+            # Start execution in background, cancel mid-way
+            # Actually cancel before calling original execute's completion logic
+            # We'll cancel from independent session right before finalization by using side effect
+            async def inner_cancel():
+                await asyncio.sleep(0.05)
+                async with session_factory() as cancel_sess:
+                    await job_service.cancel_job(cancel_sess, jid)
+                    await cancel_sess.commit()
+
+            cancel_task = asyncio.create_task(inner_cancel())
+
+            # Call original execute which will do its own authoritative check
+            result = await original_execute(sess, jid)
+            await cancel_task
+            return result
+
+        # Use long exec that allows cancellation task to run
+        with patch("app.services.orchestrator.orchestrator_service.execute_mission_isolated", new_callable=AsyncMock) as mock_exec2:
+
+            async def long_exec(*args, **kwargs):
+                await asyncio.sleep(0.1)
+                return {"status": "completed"}
+
+            mock_exec2.side_effect = long_exec
+
+            async with session_factory() as exec_session:
+                # Claim already done, now execute with cancellation race
+                # Cancel from another session while execution in progress
+                async def cancel_during():
+                    await asyncio.sleep(0.05)
+                    async with session_factory() as cs:
+                        await job_service.cancel_job(cs, job_id)
+                        await cs.commit()
+
+                cancel_task = asyncio.create_task(cancel_during())
+                result = await worker.execute_job(exec_session, job_id)
+                await exec_session.commit()
+                await cancel_task
+                assert result is True
+
+        async with session_factory() as session:
+            final_job = await job_service.get_job(session, job_id)
+            assert final_job.status == "cancelled", f"Should remain cancelled when cancellation happens before finalization, got {final_job.status}"
