@@ -43,6 +43,11 @@ interface RuntimeState {
   showApprovalModal: boolean;
   modalApprovalId: string | null;
 
+  // Runtime mode - mock/realtime boundary
+  runtimeMode: RuntimeMode;
+  lastEventId: string | null;
+  isRealtimeConnected: boolean;
+
   // Actions
   setSelectedAgent: (id: string | null) => void;
   setSelectedTask: (id: string | null) => void;
@@ -58,9 +63,14 @@ interface RuntimeState {
   denyApproval: (id: string) => void;
   runMission: (goal: string, type: MockMission["type"]) => void;
   simulateEvent: () => void;
-  // Future: replace mock with real WS
-  // In future, this store will be updated via WS events: EventEnvelope -> update agents/tasks/etc.
+  setRuntimeMode: (mode: RuntimeMode) => void;
+  setLastEventId: (id: string | null) => void;
+  setRealtimeConnected: (connected: boolean) => void;
+  // Realtime adapter dispatches EventEnvelope -> store, same shape for UI
 }
+
+// Runtime mode - mock/realtime boundary, default safe mock
+export type RuntimeMode = "mock" | "realtime";
 
 // Module-scoped interval handle for lifecycle-safe simulation - prevents overlapping intervals
 let missionProgressInterval: ReturnType<typeof setInterval> | null = null;
@@ -92,6 +102,10 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
   showApprovalModal: false,
   modalApprovalId: null,
 
+  runtimeMode: "mock" as RuntimeMode,
+  lastEventId: null,
+  isRealtimeConnected: false,
+
   setSelectedAgent: (id) => set({ selectedAgentId: id, selectedTaskId: null, selectedApprovalId: null }),
   setSelectedTask: (id) => set({ selectedTaskId: id, selectedAgentId: null, selectedApprovalId: null }),
   setSelectedApproval: (id) => set({ selectedApprovalId: id }),
@@ -100,6 +114,9 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
   setComposerValue: (value) => set({ composerValue: value }),
   setComposerType: (type) => set({ composerType: type }),
   setActiveMission: (mission) => set({ activeMission: mission }),
+  setRuntimeMode: (mode) => set({ runtimeMode: mode }),
+  setLastEventId: (id) => set({ lastEventId: id }),
+  setRealtimeConnected: (connected) => set({ isRealtimeConnected: connected }),
 
   openApprovalModal: (id) => set({ showApprovalModal: true, modalApprovalId: id, selectedApprovalId: id }),
   closeApprovalModal: () => set({ showApprovalModal: false, modalApprovalId: null }),

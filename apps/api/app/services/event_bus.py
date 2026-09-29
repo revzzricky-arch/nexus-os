@@ -83,6 +83,15 @@ class EventBusService:
         # In-process publish for tests/future WS
         await self._publish_in_process(event)
 
+        # Broadcast to WebSocket manager if available (in-process, Redis not required)
+        try:
+            from app.services.websocket_manager import websocket_manager
+
+            # Fire and forget broadcast - do not block emit on WS failures
+            asyncio.create_task(websocket_manager.broadcast_event(event))
+        except Exception:
+            pass
+
         return event
 
     async def _publish_redis(self, event: Event) -> None:

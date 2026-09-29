@@ -64,6 +64,8 @@ app.include_router(memory.router, prefix="/api/v1")
 app.include_router(rag.router, prefix="/api/v1")
 app.include_router(approvals.router, prefix="/api/v1")
 app.include_router(tool_calls.router, prefix="/api/v1")
+app.include_router(ws.router, prefix="/api/v1")
+# Legacy support for /ws without prefix (Phase 2A scaffold used /ws)
 app.include_router(ws.router)
 
 
